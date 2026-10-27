@@ -136,3 +136,10 @@ CORS_ALLOWED_ORIGINS = os.getenv(
 REST_FRAMEWORK = {
     "COERCE_DECIMAL_TO_STRING": False,
 }
+
+# Voice (OpenAI). The key lives only in .env, never in git.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe")
+OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4.1-mini")
+VOICE_LANGUAGE = os.getenv("VOICE_LANGUAGE", "ur")  # empty = auto-detect
+DATA_UPLOAD_MAX_MEMORY_SIZE = 12 * 1024 * 1024

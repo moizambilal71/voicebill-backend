@@ -11,5 +11,7 @@ router.register("bills", views.BillViewSet)
 
 urlpatterns = [
     path("health/", views.health),
+    path("voice/transcribe/", views.voice_transcribe),
+    path("voice/interpret/", views.voice_interpret),
     path("", include(router.urls)),
 ]

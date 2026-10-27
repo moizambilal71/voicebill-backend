@@ -18,6 +18,16 @@ python manage.py runserver
 
 API: http://127.0.0.1:8000/api/  ·  Admin: http://127.0.0.1:8000/admin/
 
+## Voice setup (OpenAI)
+
+1. Put your key in `.env` (this file is git-ignored, never commit it):
+   `OPENAI_API_KEY=sk-...`
+2. Optional: `OPENAI_TRANSCRIBE_MODEL` (default `gpt-4o-transcribe`), `OPENAI_CHAT_MODEL` (default `gpt-4.1-mini`),
+   `VOICE_LANGUAGE` (default `ur`; leave empty for auto-detect).
+3. Restart the server.
+
+Run the tests (no OpenAI needed): `python manage.py test`
+
 ## After every `git pull`
 
 ```bash
@@ -45,11 +55,22 @@ python manage.py runserver
 5. Each bill line stores `list_price` and `sold_price`, so discounts are reportable.
 6. Stock is reduced only when a bill is confirmed, and only for products with `track_stock = true`.
 
+## Voice pipeline
+
+`audio -> /api/voice/transcribe/ -> text -> /api/voice/interpret/ -> proposed actions -> shopkeeper confirms -> normal API calls`
+
+The AI only **proposes**. `interpret` never writes to the database. Every id the AI returns is checked against the real
+catalog and bill, and anything unclear is marked for the shopkeeper: `needs_variant` (which category?) or
+`needs_price` (Kitne ka hai?). Action types: `add_items`, `edit_item`, `remove_item`, `update_catalog_price`,
+`price_scope` (bill only or permanent?), `add_product`, `confirm_bill`, `cancel_bill`, `clarify`.
+
 ## Endpoints
 
 | Method | Path | What it does |
 |---|---|---|
 | GET | `/api/health/` | Health check |
+| POST | `/api/voice/transcribe/` | Audio (`audio` form field) to text |
+| POST | `/api/voice/interpret/` | `{ text, bill_id }` to proposed actions (saves nothing) |
 | GET/POST | `/api/products/` | List / create product with variants |
 | POST | `/api/products/{id}/add_variant/` | Add a category |
 | POST | `/api/products/{id}/add_alias/` | Add a spoken name |

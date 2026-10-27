@@ -4,8 +4,11 @@ from django.db import transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import status, viewsets
-from rest_framework.decorators import action, api_view
+from rest_framework.decorators import action, api_view, parser_classes
+from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
+
+from . import voice as voice_service
 
 from .models import Alias, Bill, BillItem, Customer, PriceHistory, Product, Variant
 from .serializers import (
@@ -164,3 +167,46 @@ class BillViewSet(viewsets.ModelViewSet):
         bill.status = Bill.Status.CANCELLED
         bill.save(update_fields=["status"])
         return Response(BillSerializer(bill).data)
+
+
+MAX_AUDIO_BYTES = 10 * 1024 * 1024
+
+
+def _voice_error(exc):
+    if isinstance(exc, voice_service.VoiceError):
+        return Response({"detail": str(exc)}, status=exc.status)
+    return Response(
+        {"detail": f"Voice service error: {exc.__class__.__name__}. Check the API key, model names and internet."},
+        status=502,
+    )
+
+
+@api_view(["POST"])
+@parser_classes([MultiPartParser])
+def voice_transcribe(request):
+    """Audio file -> text. Form field: audio."""
+    audio = request.FILES.get("audio")
+    if audio is None:
+        return Response({"detail": "Send the recording in the 'audio' field."}, status=400)
+    if audio.size > MAX_AUDIO_BYTES:
+        return Response({"detail": "Recording is too long. Keep commands short."}, status=400)
+    if audio.size < 1000:
+        return Response({"detail": "Recording was empty. Hold the mic a little longer."}, status=400)
+    try:
+        text = voice_service.transcribe(audio.name or "speech.webm", audio.read(), audio.content_type)
+    except Exception as exc:  # noqa: BLE001 - surface any provider error as a clean message
+        return _voice_error(exc)
+    return Response({"text": text})
+
+
+@api_view(["POST"])
+def voice_interpret(request):
+    """Text (+ optional bill_id) -> proposed actions. Nothing is saved here."""
+    text = request.data.get("text", "")
+    bill = None
+    if request.data.get("bill_id"):
+        bill = Bill.objects.prefetch_related("items").filter(pk=request.data["bill_id"]).first()
+    try:
+        return Response(voice_service.interpret(text, bill))
+    except Exception as exc:  # noqa: BLE001
+        return _voice_error(exc)
