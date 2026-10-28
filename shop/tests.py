@@ -379,3 +379,35 @@ class ProductEditDeleteTests(TestCase):
         self.assertFalse(Variant.objects.filter(product_id=self.product["id"]).exists())
         item = bill.items.get()
         self.assertEqual((item.item_name, item.sold_price, item.variant_id), ("Daliya (Regular)", 100, None))
+
+
+class BillFilterTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.a = Bill.objects.create(customer_name="Bilal Ahmed")
+        self.b = Bill.objects.create(customer_name="Ali")
+        self.c = Bill.objects.create(customer_name="bilal khan")
+        from django.utils import timezone
+        import datetime as dt
+        Bill.objects.filter(pk=self.c.pk).update(created_at=timezone.now() - dt.timedelta(days=3))
+
+    def ids(self, qs):
+        res = self.client.get("/api/bills/" + qs)
+        self.assertEqual(res.status_code, 200)
+        return {b["id"] for b in res.json()}
+
+    def test_search_by_name_is_case_insensitive(self):
+        self.assertEqual(self.ids("?q=bilal"), {self.a.id, self.c.id})
+
+    def test_filter_by_day(self):
+        from django.utils import timezone
+        today = timezone.localdate().isoformat()
+        self.assertEqual(self.ids(f"?date={today}"), {self.a.id, self.b.id})
+
+    def test_name_and_day_together(self):
+        from django.utils import timezone
+        today = timezone.localdate().isoformat()
+        self.assertEqual(self.ids(f"?date={today}&q=bilal"), {self.a.id})
+
+    def test_bad_date_is_ignored(self):
+        self.assertEqual(len(self.ids("?date=nope")), 3)

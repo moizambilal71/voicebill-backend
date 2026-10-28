@@ -1,3 +1,4 @@
+import datetime
 from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
@@ -91,6 +92,24 @@ class CustomerViewSet(viewsets.ModelViewSet):
 class BillViewSet(viewsets.ModelViewSet):
     queryset = Bill.objects.prefetch_related("items", "items__variant")
     serializer_class = BillSerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.action != "list":
+            return qs
+        params = self.request.query_params
+        q = (params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(customer_name__icontains=q)
+        # Dates are local (Asia/Karachi) days, YYYY-MM-DD. "date" = one day; "date_from"/"date_to" = a range.
+        for key, lookup in (("date", "created_at__date"), ("date_from", "created_at__date__gte"), ("date_to", "created_at__date__lte")):
+            value = params.get(key)
+            if value:
+                try:
+                    qs = qs.filter(**{lookup: datetime.date.fromisoformat(value)})
+                except ValueError:
+                    pass
+        return qs
 
     def _fresh(self, bill):
         """Re-read the bill so the response reflects the latest items."""

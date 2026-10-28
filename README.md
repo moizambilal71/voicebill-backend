@@ -91,7 +91,7 @@ app sends the current proposal back as `pending` so a spoken answer or correctio
 | POST | `/api/variants/{id}/update_price/` | Permanent price change `{ "price": 160 }` |
 | GET | `/api/variants/{id}/price_history/` | Price change log |
 | GET/POST | `/api/customers/` | Customers |
-| GET/POST | `/api/bills/` | List / create draft bill `{ "customer_name": "Ali" }` |
+| GET/POST | `/api/bills/` | List (filters: `?q=name&date=YYYY-MM-DD`, also `date_from`, `date_to`) / create draft bill `{ "customer_name": "Ali" }` |
 | POST | `/api/bills/{id}/add_item/` | Add a line (see below) |
 | PATCH/DELETE | `/api/bills/{id}/items/{item_id}/` | Edit / remove a line |
 | POST | `/api/bills/{id}/confirm/` | Finalize bill, reduce stock |
