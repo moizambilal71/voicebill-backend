@@ -55,6 +55,13 @@ python manage.py runserver
 5. Each bill line stores `list_price` and `sold_price`, so discounts are reportable.
 6. Stock is reduced only when a bill is confirmed, and only for products with `track_stock = true`.
 
+## Settings and bill templates
+
+- `ShopSettings` (one record): bill language (`en`, `ur`, `roman`, `both` = Urdu + English) and the shop name, address and phone printed on bills.
+- `BillTemplate`: paper (`58mm`, `80mm`, `a4`), layout (`receipt`, `invoice`, `minimal`), text size, header and footer line, and show/hide options (customer, date, units, discount, item numbers).
+- A built-in **Default receipt** template always exists. It cannot be edited or deleted. Users add their own templates.
+- Exactly one template is selected. If the selected one is deleted, the default becomes selected again.
+
 ## Voice pipeline
 
 `audio -> /api/voice/transcribe/ -> text -> /api/voice/interpret/ -> proposed actions -> shopkeeper confirms -> normal API calls`
@@ -69,6 +76,10 @@ catalog and bill, and anything unclear is marked for the shopkeeper: `needs_vari
 | Method | Path | What it does |
 |---|---|---|
 | GET | `/api/health/` | Health check |
+| GET/PUT/PATCH | `/api/settings/` | Bill language and shop details |
+| GET/POST | `/api/templates/` | List / add bill templates |
+| PATCH/DELETE | `/api/templates/{id}/` | Edit / delete a custom template |
+| POST | `/api/templates/{id}/select/` | Use this template for printing |
 | POST | `/api/voice/transcribe/` | Audio (`audio` form field) to text |
 | POST | `/api/voice/interpret/` | `{ text, bill_id }` to proposed actions (saves nothing) |
 | GET/POST | `/api/products/` | List / create product with variants |

@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db import models
+from django.db import models, transaction
 
 
 class Unit(models.TextChoices):
@@ -157,3 +157,88 @@ class BillItem(models.Model):
         if self.list_price is None or self.sold_price >= self.list_price:
             return Decimal("0")
         return ((self.list_price - self.sold_price) * self.quantity).quantize(Decimal("0.01"))
+
+
+class ShopSettings(models.Model):
+    """One row for the whole shop: bill language and shop details printed on bills."""
+
+    class Language(models.TextChoices):
+        ENGLISH = "en", "English"
+        URDU = "ur", "Urdu"
+        ROMAN = "roman", "Roman Urdu"
+        BOTH = "both", "Urdu + English"
+
+    language = models.CharField(max_length=10, choices=Language.choices, default=Language.ENGLISH)
+    shop_name = models.CharField(max_length=200, blank=True)
+    shop_address = models.CharField(max_length=300, blank=True)
+    shop_phone = models.CharField(max_length=50, blank=True)
+
+    class Meta:
+        verbose_name_plural = "shop settings"
+
+    @classmethod
+    def load(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    def __str__(self):
+        return self.shop_name or "Shop settings"
+
+
+class BillTemplate(models.Model):
+    """How a printed bill looks. One built-in default plus any the shopkeeper adds.
+
+    Exactly one template is selected at any time; if none is chosen the default is.
+    """
+
+    class Paper(models.TextChoices):
+        MM58 = "58mm", "58 mm thermal roll"
+        MM80 = "80mm", "80 mm thermal roll"
+        A4 = "a4", "A4 sheet"
+
+    class Layout(models.TextChoices):
+        RECEIPT = "receipt", "Receipt"
+        INVOICE = "invoice", "Invoice table"
+        MINIMAL = "minimal", "Minimal"
+
+    class FontSize(models.TextChoices):
+        SMALL = "small", "Small"
+        MEDIUM = "medium", "Medium"
+        LARGE = "large", "Large"
+
+    name = models.CharField(max_length=80)
+    is_default = models.BooleanField(default=False)
+    is_selected = models.BooleanField(default=False)
+    paper_size = models.CharField(max_length=10, choices=Paper.choices, default=Paper.MM80)
+    layout = models.CharField(max_length=10, choices=Layout.choices, default=Layout.RECEIPT)
+    font_size = models.CharField(max_length=10, choices=FontSize.choices, default=FontSize.MEDIUM)
+    header_text = models.CharField(max_length=200, blank=True)
+    footer_text = models.CharField(max_length=200, blank=True)
+    show_customer = models.BooleanField(default=True)
+    show_date = models.BooleanField(default=True)
+    show_unit = models.BooleanField(default=True)
+    show_discount = models.BooleanField(default=True)
+    show_item_numbers = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-is_default", "created_at"]
+
+    def __str__(self):
+        return self.name
+
+    @classmethod
+    def ensure_default(cls):
+        default = cls.objects.filter(is_default=True).first()
+        if default is None:
+            default = cls.objects.create(name="Default receipt", is_default=True)
+        if not cls.objects.filter(is_selected=True).exists():
+            default.is_selected = True
+            default.save(update_fields=["is_selected"])
+        return default
+
+    def select(self):
+        with transaction.atomic():
+            BillTemplate.objects.exclude(pk=self.pk).update(is_selected=False)
+            self.is_selected = True
+            self.save(update_fields=["is_selected"])

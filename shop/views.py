@@ -10,14 +10,16 @@ from rest_framework.response import Response
 
 from . import voice as voice_service
 
-from .models import Alias, Bill, BillItem, Customer, PriceHistory, Product, Variant
+from .models import Alias, Bill, BillItem, BillTemplate, Customer, PriceHistory, Product, ShopSettings, Variant
 from .serializers import (
     AliasSerializer,
     BillItemSerializer,
     BillSerializer,
+    BillTemplateSerializer,
     CustomerSerializer,
     PriceHistorySerializer,
     ProductSerializer,
+    ShopSettingsSerializer,
     VariantSerializer,
 )
 
@@ -210,3 +212,51 @@ def voice_interpret(request):
         return Response(voice_service.interpret(text, bill))
     except Exception as exc:  # noqa: BLE001
         return _voice_error(exc)
+
+
+@api_view(["GET", "PUT", "PATCH"])
+def shop_settings(request):
+    """Bill language + shop details (one record for the whole shop)."""
+    obj = ShopSettings.load()
+    if request.method == "GET":
+        return Response(ShopSettingsSerializer(obj).data)
+    serializer = ShopSettingsSerializer(obj, data=request.data, partial=request.method == "PATCH")
+    serializer.is_valid(raise_exception=True)
+    serializer.save()
+    return Response(serializer.data)
+
+
+class BillTemplateViewSet(viewsets.ModelViewSet):
+    """Built-in default + templates the shopkeeper adds. Exactly one is selected."""
+
+    queryset = BillTemplate.objects.all()
+    serializer_class = BillTemplateSerializer
+
+    def list(self, request, *args, **kwargs):
+        BillTemplate.ensure_default()
+        return super().list(request, *args, **kwargs)
+
+    def perform_create(self, serializer):
+        BillTemplate.ensure_default()
+        serializer.save(is_default=False, is_selected=False)
+
+    def update(self, request, *args, **kwargs):
+        if self.get_object().is_default:
+            return Response(
+                {"detail": "The default template cannot be edited. Add a new template instead."}, status=400
+            )
+        return super().update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        template = self.get_object()
+        if template.is_default:
+            return Response({"detail": "The default template cannot be deleted."}, status=400)
+        template.delete()
+        BillTemplate.ensure_default()  # if the deleted one was selected, fall back to default
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"])
+    def select(self, request, pk=None):
+        template = self.get_object()
+        template.select()
+        return Response(BillTemplateSerializer(template).data)

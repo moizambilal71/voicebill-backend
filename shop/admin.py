@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Alias, Bill, BillItem, Customer, PriceHistory, Product, Variant
+from .models import Alias, Bill, BillItem, BillTemplate, Customer, PriceHistory, Product, ShopSettings, Variant
 
 
 class VariantInline(admin.TabularInline):
@@ -40,3 +40,5 @@ class BillAdmin(admin.ModelAdmin):
 
 admin.site.register(Customer)
 admin.site.register(PriceHistory)
+admin.site.register(ShopSettings)
+admin.site.register(BillTemplate)

@@ -159,3 +159,85 @@ class VoiceTranscribeTests(TestCase):
             res = self.client.post("/api/voice/transcribe/", {"audio": f}, format="multipart")
         self.assertEqual(res.status_code, 503)
         self.assertIn("OPENAI_API_KEY", res.json()["detail"])
+
+
+class SettingsAndTemplateTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def templates(self):
+        return self.client.get("/api/templates/").json()
+
+    def test_settings_defaults_and_update(self):
+        data = self.client.get("/api/settings/").json()
+        self.assertEqual(data["language"], "en")
+        res = self.client.patch(
+            "/api/settings/", {"language": "ur", "shop_name": "Ali General Store"}, format="json"
+        )
+        self.assertEqual(res.status_code, 200)
+        data = self.client.get("/api/settings/").json()
+        self.assertEqual((data["language"], data["shop_name"]), ("ur", "Ali General Store"))
+
+    def test_invalid_language_rejected(self):
+        res = self.client.patch("/api/settings/", {"language": "klingon"}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+    def test_default_template_exists_and_is_selected(self):
+        items = self.templates()
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["is_default"])
+        self.assertTrue(items[0]["is_selected"])
+
+    def test_add_templates_and_select(self):
+        self.templates()
+        a = self.client.post("/api/templates/", {"name": "A4 invoice", "paper_size": "a4", "layout": "invoice"}, format="json")
+        b = self.client.post("/api/templates/", {"name": "Small roll", "paper_size": "58mm"}, format="json")
+        self.assertEqual((a.status_code, b.status_code), (201, 201))
+        self.assertFalse(a.json()["is_selected"])  # new templates don't steal the selection
+        self.assertEqual(len(self.templates()), 3)
+
+        self.client.post(f"/api/templates/{b.json()['id']}/select/")
+        selected = [t["name"] for t in self.templates() if t["is_selected"]]
+        self.assertEqual(selected, ["Small roll"])  # exactly one selected
+
+        self.client.post(f"/api/templates/{a.json()['id']}/select/")
+        selected = [t["name"] for t in self.templates() if t["is_selected"]]
+        self.assertEqual(selected, ["A4 invoice"])
+
+    def test_deleting_selected_falls_back_to_default(self):
+        self.templates()
+        t = self.client.post("/api/templates/", {"name": "Mine"}, format="json").json()
+        self.client.post(f"/api/templates/{t['id']}/select/")
+        self.assertEqual(self.client.delete(f"/api/templates/{t['id']}/").status_code, 204)
+        items = self.templates()
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["is_default"] and items[0]["is_selected"])
+
+    def test_default_cannot_be_deleted_or_edited(self):
+        default = self.templates()[0]
+        self.assertEqual(self.client.delete(f"/api/templates/{default['id']}/").status_code, 400)
+        res = self.client.patch(f"/api/templates/{default['id']}/", {"name": "x"}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+    def test_cannot_fake_default_or_selected_on_create(self):
+        self.templates()
+        t = self.client.post(
+            "/api/templates/", {"name": "Sneaky", "is_default": True, "is_selected": True}, format="json"
+        ).json()
+        self.assertFalse(t["is_default"])
+        self.assertFalse(t["is_selected"])
+
+    def test_validation(self):
+        self.assertEqual(self.client.post("/api/templates/", {"name": "  "}, format="json").status_code, 400)
+        res = self.client.post("/api/templates/", {"name": "x", "paper_size": "a3"}, format="json")
+        self.assertEqual(res.status_code, 400)
+
+    def test_edit_custom_template(self):
+        self.templates()
+        t = self.client.post("/api/templates/", {"name": "Mine"}, format="json").json()
+        res = self.client.patch(
+            f"/api/templates/{t['id']}/", {"footer_text": "Wapis nahi hoga", "show_discount": False}, format="json"
+        )
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["footer_text"], "Wapis nahi hoga")
+        self.assertFalse(res.json()["show_discount"])

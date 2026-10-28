@@ -1,7 +1,9 @@
 from django.db import transaction
 from rest_framework import serializers
 
-from .models import Alias, Bill, BillItem, Customer, PriceHistory, Product, Variant
+from .models import (
+    Alias, Bill, BillItem, BillTemplate, Customer, PriceHistory, Product, ShopSettings, Variant,
+)
 
 
 class AliasSerializer(serializers.ModelSerializer):
@@ -117,3 +119,26 @@ class BillSerializer(serializers.ModelSerializer):
             "total", "total_discount", "created_at", "confirmed_at",
         ]
         read_only_fields = ["status", "confirmed_at"]
+
+
+class ShopSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ShopSettings
+        fields = ["language", "shop_name", "shop_address", "shop_phone"]
+
+
+class BillTemplateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BillTemplate
+        fields = [
+            "id", "name", "is_default", "is_selected", "paper_size", "layout", "font_size",
+            "header_text", "footer_text", "show_customer", "show_date", "show_unit",
+            "show_discount", "show_item_numbers",
+        ]
+        read_only_fields = ["is_default", "is_selected"]
+
+    def validate_name(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Template needs a name.")
+        return value
