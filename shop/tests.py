@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -32,7 +33,7 @@ class VoiceInterpretTests(TestCase):
         [a] = self.interpret([{"type": "add_items", "items": [
             {"spoken_name": "cheeni", "product_id": self.sugar.id, "quantity": 0.5, "unit": "kg"}]}])
         item = a["items"][0]
-        self.assertEqual(item["status"], "ready")
+        self.assertEqual(item["missing"], [])
         self.assertEqual(item["variant_id"], self.sugar_v.id)
         self.assertIsNone(item["price"])
         self.assertEqual(item["list_price"], 150)
@@ -49,39 +50,39 @@ class VoiceInterpretTests(TestCase):
         [a] = self.interpret([{"type": "add_items", "items": [
             {"spoken_name": "daliya", "product_id": self.daliya.id, "quantity": 1}]}])
         item = a["items"][0]
-        self.assertEqual(item["status"], "needs_variant")
+        self.assertEqual(item["missing"], ["variant"])
         self.assertEqual([o["price"] for o in item["options"]], [100, 150, 200])
 
     def test_spoken_price_matching_variant_picks_it(self):
         [a] = self.interpret([{"type": "add_items", "items": [
             {"spoken_name": "daliya", "product_id": self.daliya.id, "price": 150}]}])
         item = a["items"][0]
-        self.assertEqual(item["status"], "ready")
+        self.assertEqual(item["missing"], ["quantity"])  # variant found from the price, quantity still unknown
         self.assertEqual(item["variant_id"], self.d150.id)
 
     def test_spoken_price_not_matching_any_variant_still_asks(self):
         [a] = self.interpret([{"type": "add_items", "items": [
             {"spoken_name": "daliya", "product_id": self.daliya.id, "price": 120}]}])
-        self.assertEqual(a["items"][0]["status"], "needs_variant")
+        self.assertIn("variant", a["items"][0]["missing"])
 
     def test_open_price_item(self):
         [a] = self.interpret([{"type": "add_items", "items": [
             {"spoken_name": "finger ring", "price": 150}]}])
         item = a["items"][0]
-        self.assertEqual(item["status"], "ready")
+        self.assertNotIn("price", item["missing"])
         self.assertIsNone(item["variant_id"])
         self.assertEqual(item["price"], 150)
 
     def test_unknown_item_without_price_asks_price(self):
         [a] = self.interpret([{"type": "add_items", "items": [{"spoken_name": "pony"}]}])
-        self.assertEqual(a["items"][0]["status"], "needs_price")
+        self.assertEqual(a["items"][0]["missing"], ["price", "quantity"])
 
     def test_made_up_ids_are_ignored(self):
         [a] = self.interpret([{"type": "add_items", "items": [
             {"spoken_name": "ghost", "product_id": 9999, "variant_id": 9999, "price": 10}]}])
         item = a["items"][0]
         self.assertIsNone(item["product_id"])
-        self.assertEqual(item["status"], "ready")
+        self.assertNotIn("price", item["missing"])
 
     def test_permanent_price_update_single_variant(self):
         [a] = self.interpret([{"type": "update_catalog_price", "product_id": self.sugar.id, "new_price": 160}])
@@ -241,3 +242,140 @@ class SettingsAndTemplateTests(TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.json()["footer_text"], "Wapis nahi hoga")
         self.assertFalse(res.json()["show_discount"])
+
+
+class VoiceFollowUpTests(TestCase):
+    """Quantity is never assumed, prices are per piece, later corrections win."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.sugar = Product.objects.create(name="Sugar", unit="kg")
+        Variant.objects.create(product=self.sugar, name="Standard", price=150)
+        self.bill = Bill.objects.create()
+
+    def run_llm(self, actions, text="x", pending=None):
+        captured = {}
+
+        def fake(messages):
+            captured["payload"] = json.loads(messages[1]["content"])
+            return {"actions": actions}
+
+        with patch("shop.voice._chat_json", fake):
+            body = {"text": text, "bill_id": self.bill.id}
+            if pending is not None:
+                body["pending"] = pending
+            res = self.client.post("/api/voice/interpret/", body, format="json")
+        self.assertEqual(res.status_code, 200, res.content)
+        return res.json()["actions"], captured["payload"]
+
+    def test_bill_without_quantity_asks_quantity(self):
+        [a], _ = self.run_llm([{"type": "add_items", "items": [
+            {"spoken_name": "sugar", "product_id": self.sugar.id, "quantity": None}]}])
+        item = a["items"][0]
+        self.assertEqual(item["missing"], ["quantity"])
+        self.assertIsNone(item["quantity"])  # NOT silently 1 kg
+
+    def test_zero_or_negative_quantity_counts_as_missing(self):
+        [a], _ = self.run_llm([{"type": "add_items", "items": [
+            {"spoken_name": "sugar", "product_id": self.sugar.id, "quantity": 0}]}])
+        self.assertEqual(a["items"][0]["missing"], ["quantity"])
+
+    def test_spoken_quantity_is_complete(self):
+        [a], _ = self.run_llm([{"type": "add_items", "items": [
+            {"spoken_name": "sugar", "product_id": self.sugar.id, "quantity": 2}]}])
+        self.assertEqual(a["items"][0]["missing"], [])
+
+    def test_unknown_items_ask_price_of_one_piece_and_keep_quantity(self):
+        [a], _ = self.run_llm([{"type": "add_items", "items": [
+            {"spoken_name": "t-shirt", "quantity": 2, "unit": "piece"},
+            {"spoken_name": "shoe", "quantity": 1, "unit": "piece"}]}])
+        tshirt, shoe = a["items"]
+        self.assertEqual((tshirt["missing"], tshirt["quantity"]), (["price"], 2))
+        self.assertEqual((shoe["missing"], shoe["quantity"]), (["price"], 1))
+
+    def test_correction_in_same_sentence_changes_the_item_being_added(self):
+        # AI emitted an edit for "catcher" although it is only being added in this sentence
+        [a], _ = self.run_llm([
+            {"type": "add_items", "items": [
+                {"spoken_name": "catcher", "quantity": 1, "price": 200},
+                {"spoken_name": "lipstick", "quantity": 1, "price": 500}]},
+            {"type": "edit_item", "spoken_name": "Catcher", "price": 100},
+        ])
+        prices = {i["spoken_name"]: i["price"] for i in a["items"]}
+        self.assertEqual(prices, {"catcher": 100, "lipstick": 500})
+
+    def test_correction_can_also_supply_a_missing_quantity(self):
+        [a], _ = self.run_llm([
+            {"type": "add_items", "items": [{"spoken_name": "ring", "price": 150}]},
+            {"type": "edit_item", "spoken_name": "ring", "quantity": 3},
+        ])
+        self.assertEqual(a["items"][0]["quantity"], 3)
+        self.assertEqual(a["items"][0]["missing"], [])
+
+    def test_pending_proposal_is_sent_to_the_ai(self):
+        pending = [{"type": "add_items", "items": [{"spoken_name": "sugar", "product_id": self.sugar.id, "quantity": None}]}]
+        [a], payload = self.run_llm(
+            [{"type": "add_items", "items": [{"spoken_name": "sugar", "product_id": self.sugar.id, "quantity": 5}]}],
+            text="paanch kilo", pending=pending)
+        self.assertEqual(payload["pending_proposal"], pending)
+        self.assertEqual(a["items"][0]["quantity"], 5)
+        self.assertEqual(a["items"][0]["missing"], [])
+
+
+class ProductEditDeleteTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        res = self.client.post("/api/products/", {
+            "name": "Daliya", "unit": "kg", "track_stock": False,
+            "variants": [{"name": "Regular", "price": 100, "stock": 0}, {"name": "Premium", "price": 200, "stock": 0}],
+        }, format="json")
+        self.product = res.json()
+        self.regular, self.premium = self.product["variants"]
+
+    def put(self, **body):
+        return self.client.patch(f"/api/products/{self.product['id']}/", body, format="json")
+
+    def test_rename_and_change_unit(self):
+        res = self.put(name="Daliya fine", unit="g")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual((res.json()["name"], res.json()["unit"]), ("Daliya fine", "g"))
+        self.assertEqual(len(res.json()["variants"]), 2)  # variants untouched when not sent
+
+    def test_edit_variant_price_logs_history(self):
+        res = self.put(variants=[{**self.regular, "price": 120}, self.premium])
+        self.assertEqual(res.status_code, 200)
+        v = Variant.objects.get(pk=self.regular["id"])
+        self.assertEqual(v.price, 120)
+        self.assertEqual(v.price_history.count(), 1)
+        self.assertEqual(Variant.objects.get(pk=self.premium["id"]).price_history.count(), 0)
+
+    def test_add_and_remove_variants(self):
+        res = self.put(variants=[self.regular, {"name": "Medium", "price": 150, "stock": 0}])
+        names = sorted(v["name"] for v in res.json()["variants"])
+        self.assertEqual(names, ["Medium", "Regular"])
+        self.assertFalse(Variant.objects.filter(pk=self.premium["id"]).exists())
+
+    def test_cannot_touch_another_products_variant(self):
+        other = Product.objects.create(name="Other", unit="kg")
+        ov = Variant.objects.create(product=other, name="X", price=1)
+        res = self.put(variants=[{"id": ov.id, "name": "X", "price": 5, "stock": 0}])
+        self.assertEqual(res.status_code, 400)
+        ov.refresh_from_db()
+        self.assertEqual(ov.price, 1)
+
+    def test_duplicate_category_names_rejected_and_nothing_changes(self):
+        res = self.put(variants=[{**self.regular, "name": "A"}, {**self.premium, "name": "A"}])
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(Variant.objects.get(pk=self.regular["id"]).name, "Regular")
+
+    def test_edit_needs_at_least_one_category(self):
+        self.assertEqual(self.put(variants=[]).status_code, 400)
+
+    def test_delete_product_keeps_old_bill_lines(self):
+        bill = Bill.objects.create()
+        BillItem.objects.create(bill=bill, variant_id=self.regular["id"], item_name="Daliya (Regular)", quantity=2, sold_price=100)
+        self.assertEqual(self.client.delete(f"/api/products/{self.product['id']}/").status_code, 204)
+        self.assertFalse(Product.objects.filter(pk=self.product["id"]).exists())
+        self.assertFalse(Variant.objects.filter(product_id=self.product["id"]).exists())
+        item = bill.items.get()
+        self.assertEqual((item.item_name, item.sold_price, item.variant_id), ("Daliya (Regular)", 100, None))

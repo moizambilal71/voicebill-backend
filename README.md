@@ -67,8 +67,9 @@ python manage.py runserver
 `audio -> /api/voice/transcribe/ -> text -> /api/voice/interpret/ -> proposed actions -> shopkeeper confirms -> normal API calls`
 
 The AI only **proposes**. `interpret` never writes to the database. Every id the AI returns is checked against the real
-catalog and bill, and anything unclear is marked for the shopkeeper: `needs_variant` (which category?) or
-`needs_price` (Kitne ka hai?). Action types: `add_items`, `edit_item`, `remove_item`, `update_catalog_price`,
+catalog and bill, and anything unclear is listed in each item's `missing` field: `variant` (which category?), `price` (price of ONE piece/kg) or
+`quantity` (never assumed, so "sugar ka bill" asks how much). A later correction in the same sentence wins, and the
+app sends the current proposal back as `pending` so a spoken answer or correction updates it. Action types: `add_items`, `edit_item`, `remove_item`, `update_catalog_price`,
 `price_scope` (bill only or permanent?), `add_product`, `confirm_bill`, `cancel_bill`, `clarify`.
 
 ## Endpoints
@@ -81,8 +82,9 @@ catalog and bill, and anything unclear is marked for the shopkeeper: `needs_vari
 | PATCH/DELETE | `/api/templates/{id}/` | Edit / delete a custom template |
 | POST | `/api/templates/{id}/select/` | Use this template for printing |
 | POST | `/api/voice/transcribe/` | Audio (`audio` form field) to text |
-| POST | `/api/voice/interpret/` | `{ text, bill_id }` to proposed actions (saves nothing) |
+| POST | `/api/voice/interpret/` | `{ text, bill_id, pending? }` to proposed actions (saves nothing) |
 | GET/POST | `/api/products/` | List / create product with variants |
+| PATCH/DELETE | `/api/products/{id}/` | Edit product and categories (send variant `id`s to keep them) / delete |
 | POST | `/api/products/{id}/add_variant/` | Add a category |
 | POST | `/api/products/{id}/add_alias/` | Add a spoken name |
 | GET | `/api/variants/` | List variants |

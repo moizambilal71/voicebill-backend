@@ -55,13 +55,14 @@ def transcribe(filename, data, content_type):
 
 SYSTEM_PROMPT = """You are the voice command parser for a billing app used by shopkeepers in Pakistan.
 The shopkeeper speaks Urdu / Roman Urdu / Hindi / English, often mixed. The text may be in Urdu script
-or Latin script. You receive the spoken text, the shop catalog and the current bill. Return ONLY a JSON
-object: {"actions": [ ... ]}. You never invent product or variant ids: use only ids from the catalog,
+or Latin script. You receive the spoken text, the shop catalog, the current bill and, sometimes, a pending
+proposal. Return ONLY a JSON object: {"actions": [ ... ]}. You never invent product or variant ids: use only ids from the catalog,
 or null when nothing matches.
 
 ACTION TYPES
 1. {"type":"add_items","items":[{"spoken_name":str,"product_id":int|null,"variant_id":int|null,"quantity":number|null,"unit":str|null,"price":number|null}]}
-   Add things to the bill. "price" is the price PER UNIT only if the shopkeeper said one, else null.
+   Add things to the bill. "price" is the price of ONE unit (1 kg, 1 piece, 1 pair...) and only if the shopkeeper said one, else null.
+   "quantity" is only what the shopkeeper said, else null.
 2. {"type":"edit_item","bill_item_id":int,"quantity":number|null,"price":number|null}
    Change a line already on the bill (ids are in CURRENT BILL).
 3. {"type":"remove_item","bill_item_id":int}
@@ -85,7 +86,25 @@ RULES
 - If the shopkeeper names a category (alias or variant name), set variant_id. If an item has several variants and none was named, leave variant_id null.
 - Item not in the catalog: product_id null, keep spoken_name as spoken (translate to a short English/Roman name), keep price if said.
 - Convert quantities to the product's unit: aadha kilo = 0.5 kg, pao = 0.25 kg, dhai kilo = 2.5 kg, 250 gram = 0.25 kg, ek dozen = 1 dozen.
-  Quantity defaults to 1 when not said. For non-catalog items use unit "piece" unless another unit is clear.
+  NEVER assume a quantity: if the shopkeeper did not say how many / how much, quantity is null (the app will ask).
+  "ek", "one", "a" count as an explicit 1. For non-catalog items use unit "piece" unless another unit is clear.
+- Prices are always for ONE unit. If the shopkeeper gives the total for the whole quantity ("dono ke 3000", "total 3000"),
+  divide: price = total / quantity. Never ask for a total.
+- Later words in the same sentence override earlier ones. If a price or quantity is corrected ("catcher 200 ka... nahi 100 kar do",
+  "catcher ki price 100 kar do"), output that item ONCE with the FINAL value. Never output the same item twice with different prices
+  because of a correction. A correction of an item that is only being added in this sentence is NOT an edit_item or update_catalog_price.
+- PENDING PROPOSAL: when "pending_proposal" is not empty the shopkeeper is looking at it. Their words are usually an answer to a missing
+  detail (quantity, price, category) or a correction. Return the COMPLETE updated list of actions (keep everything that was not changed,
+  with its quantity/price/variant_id), not just the change. If the words are clearly a new, unrelated command, return only the new actions.
+  A price said about an item in the pending proposal changes that item in the proposal; it is not a catalog update unless the shopkeeper
+  says it is permanent.
+
+EXAMPLES
+"sugar ka bill bana do" -> {"actions":[{"type":"add_items","items":[{"spoken_name":"sugar","product_id":<sugar id>,"variant_id":null,"quantity":null,"unit":"kg","price":null}]}]}
+"ek catcher 200 ka, ek lipstick 500 ki, catcher ki price 100 kar do" ->
+  {"actions":[{"type":"add_items","items":[{"spoken_name":"catcher","product_id":null,"variant_id":null,"quantity":1,"unit":"piece","price":100},{"spoken_name":"lipstick","product_id":null,"variant_id":null,"quantity":1,"unit":"piece","price":500}]}]}
+"2 t-shirt aur 1 shoe ka bill bana do" -> two items, quantity 2 and 1, unit "piece", price null (the app asks the price of ONE piece).
+pending has sugar with quantity null; shopkeeper says "paanch kilo" -> same actions, sugar quantity 5.
 - Valid units: kg, g, l, piece, meter, dozen, pack.
 - One utterance can contain several actions, in the order spoken.
 - Numbers may be in words (sau, do sau, dhai sau) or Urdu digits; output plain numbers.
@@ -138,7 +157,7 @@ def _bill_context(bill):
     ]
 
 
-def interpret(text, bill=None):
+def interpret(text, bill=None, pending=None):
     text = (text or "").strip()
     if not text:
         raise VoiceError("Nothing was heard. Please try again.")
@@ -146,6 +165,7 @@ def interpret(text, bill=None):
         "spoken_text": text,
         "catalog": _catalog_context(),
         "current_bill": _bill_context(bill),
+        "pending_proposal": pending if isinstance(pending, list) else [],
     }
     raw = _chat_json([
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -206,7 +226,9 @@ def _resolve_add_items(action):
         product = _product(raw.get("product_id"))
         variant = _variant_of(product, raw.get("variant_id"))
         price = _num(raw.get("price"))
-        qty = _num(raw.get("quantity")) or Decimal("1")
+        qty = _num(raw.get("quantity"))
+        if qty is not None and qty <= 0:
+            qty = None
         unit = raw.get("unit") if raw.get("unit") in VALID_UNITS else None
         spoken = str(raw.get("spoken_name") or "").strip() or "Item"
 
@@ -221,7 +243,7 @@ def _resolve_add_items(action):
             "price": _f(price),
             "list_price": None,
             "options": [],
-            "status": "ready",
+            "missing": [],  # what the shopkeeper still has to tell us: variant / quantity / price
         }
 
         if product:
@@ -233,7 +255,7 @@ def _resolve_add_items(action):
                 if len(matches) == 1:  # "150 wala daliya" -> the 150 category
                     variant = matches[0]
             if variant is None:
-                item["status"] = "needs_variant"
+                item["missing"].append("variant")
                 item["options"] = _options(product)
                 item["item_name"] = product.name
             else:
@@ -241,7 +263,10 @@ def _resolve_add_items(action):
                 item["item_name"] = str(variant)
                 item["list_price"] = float(variant.price)
         elif price is None:
-            item["status"] = "needs_price"  # not in catalog and no price: "Kitne ka hai?"
+            item["missing"].append("price")  # not in the catalog: ask the price of ONE unit
+
+        if qty is None:
+            item["missing"].append("quantity")
         items.append(item)
     return {"type": "add_items", "items": items} if items else None
 
@@ -266,6 +291,35 @@ def _resolve_variant_action(action, price_key):
     }
 
 
+def _norm(text):
+    return " ".join(str(text or "").lower().split())
+
+
+def _merge_correction(resolved, action):
+    """"catcher ki price 100 kar do" said in the same sentence that added the catcher:
+    change the item being added instead of looking for a bill line that does not exist yet."""
+    name = _norm(action.get("spoken_name") or action.get("name") or action.get("item_name"))
+    price, qty = _num(action.get("price")), _num(action.get("quantity"))
+    if not name or (price is None and not qty):
+        return False
+    for prev in reversed(resolved):
+        if prev.get("type") != "add_items":
+            continue
+        for item in reversed(prev["items"]):
+            names = {_norm(item["spoken_name"]), _norm(item["item_name"]), _norm(item.get("product_name"))}
+            if name in names:
+                if price is not None:
+                    item["price"] = _f(price)
+                    if "price" in item["missing"]:
+                        item["missing"].remove("price")
+                if qty:
+                    item["quantity"] = _f(qty)
+                    if "quantity" in item["missing"]:
+                        item["missing"].remove("quantity")
+                return True
+    return False
+
+
 _PRICE_CLARIFY = {"type": "clarify", "question": "Kaun si cheez ki price? Dobara bataiye."}
 
 
@@ -280,8 +334,11 @@ def resolve_actions(actions, bill):
         if kind == "add_items":
             out = _resolve_add_items(action)
 
-        elif kind in ("edit_item", "remove_item") and bill:
-            item = bill.items.filter(pk=_int(action.get("bill_item_id"))).first()
+        elif kind in ("edit_item", "remove_item"):
+            item = bill.items.filter(pk=_int(action.get("bill_item_id"))).first() if bill else None
+            if item is None and kind == "edit_item":
+                if _merge_correction(resolved, action):
+                    continue
             if item:
                 out = {"type": kind, "bill_item_id": item.id, "item_name": item.item_name}
                 if kind == "edit_item":

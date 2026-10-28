@@ -1,4 +1,4 @@
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from rest_framework import serializers
 
 from .models import (
@@ -47,9 +47,40 @@ class ProductSerializer(serializers.ModelSerializer):
 
     @transaction.atomic
     def update(self, instance, validated_data):
-        # Variant prices are changed via the update-price endpoint so history is kept.
-        validated_data.pop("variants", None)
-        return super().update(instance, validated_data)
+        """Edit a product and its categories in one go.
+
+        Variants sent with an id are updated, without an id are added, and existing ones that are
+        left out are removed (old bills keep their item name and price). A changed price is logged.
+        """
+        variants = validated_data.pop("variants", None)
+        instance = super().update(instance, validated_data)
+        if variants is None:
+            return instance
+
+        existing = {v.id: v for v in instance.variants.all()}
+        sent_ids = {d["id"] for d in variants if d.get("id") is not None}
+        unknown = sent_ids - existing.keys()
+        if unknown:
+            raise serializers.ValidationError({"variants": "A category does not belong to this product."})
+
+        try:
+            for vid, v in existing.items():
+                if vid not in sent_ids:
+                    v.delete()
+            for data in variants:
+                vid = data.pop("id", None)
+                if vid is None:
+                    Variant.objects.create(product=instance, **data)
+                    continue
+                v = existing[vid]
+                if "price" in data and data["price"] != v.price:
+                    PriceHistory.objects.create(variant=v, old_price=v.price, new_price=data["price"])
+                for field, value in data.items():
+                    setattr(v, field, value)
+                v.save()
+        except IntegrityError:
+            raise serializers.ValidationError({"variants": "Category names must be different from each other."})
+        return instance
 
 
 class PriceHistorySerializer(serializers.ModelSerializer):

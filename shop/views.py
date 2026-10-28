@@ -209,7 +209,7 @@ def voice_interpret(request):
     if request.data.get("bill_id"):
         bill = Bill.objects.prefetch_related("items").filter(pk=request.data["bill_id"]).first()
     try:
-        return Response(voice_service.interpret(text, bill))
+        return Response(voice_service.interpret(text, bill, request.data.get("pending")))
     except Exception as exc:  # noqa: BLE001
         return _voice_error(exc)
 
