@@ -411,3 +411,42 @@ class BillFilterTests(TestCase):
 
     def test_bad_date_is_ignored(self):
         self.assertEqual(len(self.ids("?date=nope")), 3)
+
+
+class ReopenDeleteBillTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.product = Product.objects.create(name="Pen", unit="piece", track_stock=True)
+        self.v = Variant.objects.create(product=self.product, name="Standard", price=10, stock=100)
+        self.bill = Bill.objects.create()
+        BillItem.objects.create(bill=self.bill, variant=self.v, item_name="Pen", quantity=4, list_price=10, sold_price=10)
+        self.client.post(f"/api/bills/{self.bill.id}/confirm/")
+
+    def stock(self):
+        self.v.refresh_from_db()
+        return self.v.stock
+
+    def test_reopen_gives_stock_back_and_allows_edit_then_reconfirm(self):
+        self.assertEqual(self.stock(), 96)
+        res = self.client.post(f"/api/bills/{self.bill.id}/reopen/")
+        self.assertEqual((res.status_code, res.json()["status"]), (200, "draft"))
+        self.assertEqual(self.stock(), 100)
+        item = self.bill.items.get()
+        self.assertEqual(self.client.patch(f"/api/bills/{self.bill.id}/items/{item.id}/", {"quantity": 6}, format="json").status_code, 200)
+        self.client.post(f"/api/bills/{self.bill.id}/confirm/")
+        self.assertEqual(self.stock(), 94)
+
+    def test_reopen_only_for_confirmed(self):
+        self.client.post(f"/api/bills/{self.bill.id}/reopen/")
+        self.assertEqual(self.client.post(f"/api/bills/{self.bill.id}/reopen/").status_code, 400)
+
+    def test_delete_confirmed_bill_restores_stock(self):
+        self.assertEqual(self.client.delete(f"/api/bills/{self.bill.id}/").status_code, 204)
+        self.assertEqual(self.stock(), 100)
+        self.assertFalse(Bill.objects.filter(pk=self.bill.id).exists())
+
+    def test_delete_draft_bill_leaves_stock(self):
+        draft = Bill.objects.create()
+        BillItem.objects.create(bill=draft, variant=self.v, item_name="Pen", quantity=1, sold_price=10)
+        self.assertEqual(self.client.delete(f"/api/bills/{draft.id}/").status_code, 204)
+        self.assertEqual(self.stock(), 96)

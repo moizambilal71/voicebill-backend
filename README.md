@@ -95,6 +95,8 @@ app sends the current proposal back as `pending` so a spoken answer or correctio
 | POST | `/api/bills/{id}/add_item/` | Add a line (see below) |
 | PATCH/DELETE | `/api/bills/{id}/items/{item_id}/` | Edit / remove a line |
 | POST | `/api/bills/{id}/confirm/` | Finalize bill, reduce stock |
+| POST | `/api/bills/{id}/reopen/` | Edit a confirmed bill again (stock is given back until re-confirmed) |
+| DELETE | `/api/bills/{id}/` | Delete a bill (stock restored if it was confirmed) |
 | POST | `/api/bills/{id}/cancel/` | Cancel draft |
 
 `add_item` examples:

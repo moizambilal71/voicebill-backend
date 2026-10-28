@@ -180,6 +180,33 @@ class BillViewSet(viewsets.ModelViewSet):
             bill.save(update_fields=["status", "confirmed_at"])
         return Response(BillSerializer(bill).data)
 
+    @staticmethod
+    def _restore_stock(bill):
+        for item in bill.items.select_related("variant__product"):
+            v = item.variant
+            if v and v.product.track_stock:
+                v.stock = v.stock + item.quantity
+                v.save(update_fields=["stock"])
+
+    @action(detail=True, methods=["post"])
+    def reopen(self, request, pk=None):
+        """Let the shopkeeper edit a confirmed bill again (before printing). Stock is given back until re-confirmed."""
+        bill = self.get_object()
+        if bill.status != Bill.Status.CONFIRMED:
+            return Response({"detail": "Only confirmed bills can be reopened."}, status=400)
+        with transaction.atomic():
+            self._restore_stock(bill)
+            bill.status = Bill.Status.DRAFT
+            bill.confirmed_at = None
+            bill.save(update_fields=["status", "confirmed_at"])
+        return self._fresh(bill)
+
+    def perform_destroy(self, instance):
+        with transaction.atomic():
+            if instance.status == Bill.Status.CONFIRMED:
+                self._restore_stock(instance)  # a deleted sale never happened
+            instance.delete()
+
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
         bill = self.get_object()
