@@ -54,6 +54,7 @@ python manage.py runserver
 4. **Permanent price change** → only via `POST /api/variants/{id}/update_price/`, after the shopkeeper confirms. Logged in `PriceHistory`.
 5. Each bill line stores `list_price` and `sold_price`, so discounts are reportable.
 6. Stock is reduced only when a bill is confirmed, and only for products with `track_stock = true`.
+7. Stock never goes below 0. `add_item`, `edit_item` and `confirm` reject more than the stock (`code: out_of_stock`) unless the request has `"ignore_stock": true`. Each line remembers what it really took (`stock_deducted`), so reopening or deleting a bill gives back exactly that. Run `python manage.py migrate` (also sets any old negative stock to 0).
 
 ## Settings and bill templates
 

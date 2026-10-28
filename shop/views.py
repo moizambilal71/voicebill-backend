@@ -120,6 +120,26 @@ class BillViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Only draft bills can be edited."}, status=400)
         return None
 
+    @staticmethod
+    def _wants_ignore_stock(request):
+        return str(request.data.get("ignore_stock", "")).lower() in ("1", "true", "yes")
+
+    @staticmethod
+    def _stock_problem(variant, wanted):
+        """Message when `wanted` units of a tracked variant are more than the stock, else None."""
+        if variant is None or not variant.product.track_stock or wanted <= variant.stock:
+            return None
+        name = f"{variant.product.name} ({variant.name})" if variant.product.variants.count() > 1 else variant.product.name
+        if variant.stock <= 0:
+            return f"{name}: Out of stock hai. Kindly add the item in your stock."
+        return f"{name}: sirf {variant.stock.normalize():f} {variant.product.unit} stock mein hai. Kindly add the item in your stock."
+
+    def _wanted_on_bill(self, bill, variant, quantity, exclude_item_id=None):
+        others = bill.items.filter(variant=variant)
+        if exclude_item_id is not None:
+            others = others.exclude(pk=exclude_item_id)
+        return sum((i.quantity for i in others), Decimal("0")) + quantity
+
     @action(detail=True, methods=["post"])
     def add_item(self, request, pk=None):
         bill = self.get_object()
@@ -127,6 +147,11 @@ class BillViewSet(viewsets.ModelViewSet):
             return err
         serializer = BillItemSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        variant = serializer.validated_data.get("variant")
+        if not self._wants_ignore_stock(request) and variant is not None:
+            problem = self._stock_problem(variant, self._wanted_on_bill(bill, variant, serializer.validated_data["quantity"]))
+            if problem:
+                return Response({"detail": problem, "code": "out_of_stock"}, status=400)
         serializer.save(bill=bill)
         response = self._fresh(bill)
         response.status_code = status.HTTP_201_CREATED
@@ -149,6 +174,11 @@ class BillViewSet(viewsets.ModelViewSet):
         data.update(request.data)
         serializer = BillItemSerializer(item, data=data)
         serializer.is_valid(raise_exception=True)
+        variant = serializer.validated_data.get("variant")
+        if not self._wants_ignore_stock(request) and variant is not None:
+            wanted = self._wanted_on_bill(bill, variant, serializer.validated_data["quantity"], exclude_item_id=item.pk)
+            if problem := self._stock_problem(variant, wanted):
+                return Response({"detail": problem, "code": "out_of_stock"}, status=400)
         serializer.save()
         return self._fresh(bill)
 
@@ -169,12 +199,25 @@ class BillViewSet(viewsets.ModelViewSet):
         if not bill.items.exists():
             return Response({"detail": "Cannot confirm an empty bill."}, status=400)
 
+        ignore = self._wants_ignore_stock(request)
         with transaction.atomic():
+            if not ignore:
+                totals = {}
+                for item in bill.items.select_related("variant__product"):
+                    if item.variant:
+                        totals[item.variant] = totals.get(item.variant, Decimal("0")) + item.quantity
+                for variant, wanted in totals.items():
+                    if problem := self._stock_problem(variant, wanted):
+                        return Response({"detail": problem, "code": "out_of_stock"}, status=400)
             for item in bill.items.select_related("variant__product"):
                 v = item.variant
                 if v and v.product.track_stock:
-                    v.stock = v.stock - item.quantity
+                    v.refresh_from_db(fields=["stock"])
+                    taken = min(max(v.stock, Decimal("0")), item.quantity)  # stock never goes below 0
+                    v.stock = v.stock - taken
                     v.save(update_fields=["stock"])
+                    item.stock_deducted = taken
+                    item.save(update_fields=["stock_deducted"])
             bill.status = Bill.Status.CONFIRMED
             bill.confirmed_at = timezone.now()
             bill.save(update_fields=["status", "confirmed_at"])
@@ -184,9 +227,11 @@ class BillViewSet(viewsets.ModelViewSet):
     def _restore_stock(bill):
         for item in bill.items.select_related("variant__product"):
             v = item.variant
-            if v and v.product.track_stock:
-                v.stock = v.stock + item.quantity
+            if v and item.stock_deducted:
+                v.stock = v.stock + item.stock_deducted
                 v.save(update_fields=["stock"])
+                item.stock_deducted = Decimal("0")
+                item.save(update_fields=["stock_deducted"])
 
     @action(detail=True, methods=["post"])
     def reopen(self, request, pk=None):

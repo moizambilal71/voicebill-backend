@@ -144,6 +144,8 @@ class BillItem(models.Model):
     price_source = models.CharField(
         max_length=10, choices=PriceSource.choices, default=PriceSource.CATALOG
     )
+    # How much stock this line really took when the bill was confirmed (stock never goes below 0).
+    stock_deducted = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("0"))
 
     def __str__(self):
         return f"{self.item_name} x {self.quantity}"

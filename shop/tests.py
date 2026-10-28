@@ -450,3 +450,62 @@ class ReopenDeleteBillTests(TestCase):
         BillItem.objects.create(bill=draft, variant=self.v, item_name="Pen", quantity=1, sold_price=10)
         self.assertEqual(self.client.delete(f"/api/bills/{draft.id}/").status_code, 204)
         self.assertEqual(self.stock(), 96)
+
+
+class StockLimitTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.p = Product.objects.create(name="Sugar", unit="kg", track_stock=True)
+        self.v = Variant.objects.create(product=self.p, name="Standard", price=150, stock=5)
+        self.bill = Bill.objects.create()
+
+    def add(self, qty, **extra):
+        return self.client.post(f"/api/bills/{self.bill.id}/add_item/", {"variant": self.v.id, "quantity": qty, **extra}, format="json")
+
+    def stock(self):
+        self.v.refresh_from_db()
+        return self.v.stock
+
+    def test_cannot_add_more_than_stock(self):
+        res = self.add(6)
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.json()["code"], "out_of_stock")
+        self.assertIn("stock", res.json()["detail"])
+        self.assertEqual(self.add(5).status_code, 201)
+
+    def test_zero_stock_says_out_of_stock(self):
+        self.v.stock = 0
+        self.v.save()
+        res = self.add(1)
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("Out of stock", res.json()["detail"])
+
+    def test_two_lines_of_same_item_count_together(self):
+        self.assertEqual(self.add(3).status_code, 201)
+        self.assertEqual(self.add(3).status_code, 400)
+
+    def test_override_allows_any_quantity_but_stock_stops_at_zero(self):
+        self.assertEqual(self.add(8, ignore_stock=True).status_code, 201)
+        res = self.client.post(f"/api/bills/{self.bill.id}/confirm/")
+        self.assertEqual(res.status_code, 400)  # confirm also checks unless overridden
+        res = self.client.post(f"/api/bills/{self.bill.id}/confirm/", {"ignore_stock": True}, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(self.stock(), 0)  # never negative
+
+    def test_reopen_gives_back_only_what_was_taken(self):
+        self.add(8, ignore_stock=True)
+        self.client.post(f"/api/bills/{self.bill.id}/confirm/", {"ignore_stock": True}, format="json")
+        self.client.post(f"/api/bills/{self.bill.id}/reopen/")
+        self.assertEqual(self.stock(), 5)
+
+    def test_edit_quantity_is_checked(self):
+        self.add(2)
+        item = self.bill.items.get()
+        url = f"/api/bills/{self.bill.id}/items/{item.id}/"
+        self.assertEqual(self.client.patch(url, {"quantity": 9}, format="json").status_code, 400)
+        self.assertEqual(self.client.patch(url, {"quantity": 9, "ignore_stock": True}, format="json").status_code, 200)
+
+    def test_untracked_products_are_never_limited(self):
+        self.p.track_stock = False
+        self.p.save()
+        self.assertEqual(self.add(500).status_code, 201)
