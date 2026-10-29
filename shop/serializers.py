@@ -2,7 +2,7 @@ from django.db import IntegrityError, transaction
 from rest_framework import serializers
 
 from .models import (
-    Alias, Bill, BillItem, BillTemplate, Customer, Notification, PriceHistory, Product, ShopSettings, Variant,
+    Alias, Barcode, Bill, BillItem, BillTemplate, Customer, Notification, PriceHistory, Product, ShopSettings, Variant,
 )
 
 
@@ -12,12 +12,63 @@ class AliasSerializer(serializers.ModelSerializer):
         fields = ["id", "text", "variant"]
 
 
+def clean_codes(codes):
+    """Strip, drop empties and duplicates, keep order."""
+    seen, out = set(), []
+    for c in codes or []:
+        c = str(c).strip()
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def set_barcodes(variant, codes):
+    """Make `codes` the complete list of codes for this category. A code used elsewhere is refused."""
+    codes = clean_codes(codes)
+    for c in codes:
+        other = Barcode.objects.filter(code=c).exclude(variant=variant).select_related("variant__product").first()
+        if other:
+            raise serializers.ValidationError(
+                {"barcodes": f"Code {c} is already linked to {other.variant.product.name} ({other.variant.name})."}
+            )
+    variant.barcodes.exclude(code__in=codes).delete()
+    have = set(variant.barcodes.values_list("code", flat=True))
+    for c in codes:
+        if c not in have:
+            Barcode.objects.create(variant=variant, code=c)
+
+
 class VariantSerializer(serializers.ModelSerializer):
     id = serializers.IntegerField(required=False)
+    barcodes = serializers.ListField(child=serializers.CharField(max_length=128), required=False, write_only=True)
 
     class Meta:
         model = Variant
-        fields = ["id", "name", "price", "stock"]
+        fields = ["id", "name", "price", "stock", "barcodes"]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["barcodes"] = [b.code for b in instance.barcodes.all()]
+        return data
+
+
+class BarcodeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Barcode
+        fields = ["id", "code", "variant"]
+        extra_kwargs = {"code": {"validators": []}}
+
+    def validate_code(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("Code cannot be empty.")
+        other = Barcode.objects.filter(code=value).select_related("variant__product").first()
+        if other:
+            raise serializers.ValidationError(
+                f"Already linked to {other.variant.product.name} ({other.variant.name})."
+            )
+        return value
 
 
 class ProductSerializer(serializers.ModelSerializer):
@@ -34,6 +85,9 @@ class ProductSerializer(serializers.ModelSerializer):
         names = [v.get("name", "Standard") for v in value]
         if len(names) != len(set(names)):
             raise serializers.ValidationError("Variant names must be unique.")
+        all_codes = [c for v in value for c in clean_codes(v.get("barcodes"))]
+        if len(all_codes) != len(set(all_codes)):
+            raise serializers.ValidationError("The same code is used twice on this product.")
         return value
 
     @transaction.atomic
@@ -42,7 +96,9 @@ class ProductSerializer(serializers.ModelSerializer):
         product = Product.objects.create(**validated_data)
         for v in variants:
             v.pop("id", None)
-            Variant.objects.create(product=product, **v)
+            codes = v.pop("barcodes", [])
+            variant = Variant.objects.create(product=product, **v)
+            set_barcodes(variant, codes)
         return product
 
     @transaction.atomic
@@ -69,8 +125,10 @@ class ProductSerializer(serializers.ModelSerializer):
                     v.delete()
             for data in variants:
                 vid = data.pop("id", None)
+                codes = data.pop("barcodes", None)
                 if vid is None:
-                    Variant.objects.create(product=instance, **data)
+                    new = Variant.objects.create(product=instance, **data)
+                    set_barcodes(new, codes)
                     continue
                 v = existing[vid]
                 if "price" in data and data["price"] != v.price:
@@ -78,6 +136,8 @@ class ProductSerializer(serializers.ModelSerializer):
                 for field, value in data.items():
                     setattr(v, field, value)
                 v.save()
+                if codes is not None:  # not sent = leave the codes alone
+                    set_barcodes(v, codes)
         except IntegrityError:
             raise serializers.ValidationError({"variants": "Category names must be different from each other."})
         return instance

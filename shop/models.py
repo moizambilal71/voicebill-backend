@@ -51,6 +51,20 @@ class Variant(models.Model):
         return f"{self.product.name} ({self.name})"
 
 
+class Barcode(models.Model):
+    """A barcode / QR code printed on a product. The code is stored exactly as scanned (any text).
+
+    A code belongs to exactly one category (variant); one category can have several codes.
+    """
+
+    code = models.CharField(max_length=128, unique=True)
+    variant = models.ForeignKey(Variant, related_name="barcodes", on_delete=models.CASCADE)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.code
+
+
 class Alias(models.Model):
     """Spoken names for a product or a specific variant.
 

@@ -56,6 +56,14 @@ python manage.py runserver
 6. Stock is reduced only when a bill is confirmed, and only for products with `track_stock = true`.
 7. Stock never goes below 0. `add_item`, `edit_item` and `confirm` reject more than the stock (`code: out_of_stock`) unless the request has `"ignore_stock": true`. Each line remembers what it really took (`stock_deducted`), so reopening or deleting a bill gives back exactly that. Run `python manage.py migrate` (also sets any old negative stock to 0).
 
+## Barcodes / QR codes
+
+- `Barcode` links a scanned text (EAN, QR or any custom code) to one category (variant). A category can have several codes; one code never belongs to two items.
+- `POST /api/bills/{id}/scan/ {code}` adds the item at its catalog price, or +1 when it is already on the bill (stock check and `ignore_stock` work as for any line). Unknown code: `404 {code: "unknown_barcode"}`. Stock itself still drops only when the bill is confirmed.
+- `GET /api/barcodes/lookup/?code=`, `POST /api/barcodes/ {variant, code}`, `DELETE /api/barcodes/{id}/`. Codes can also be sent inside `variants[].barcodes` when creating/editing a product.
+- Big catalogs: `GET /api/products/?q=&limit=&offset=` searches name, category, spoken name and barcode and returns `{count, results}` (without these params you get the plain list as before). Voice only sends the AI the products that match what was said once the catalog has more than 200 items.
+- `POST /api/products/import/` (multipart `file` = .csv or .xlsx, add `dry_run=1` for a preview). Columns: name, category, unit, price, stock, barcode. Good rows are saved, bad rows are reported with their row number.
+
 ## Notifications and stock monitor
 
 - The bell icon in the app shows `Notification` records (`GET /api/notifications/` -> `{unread, items}`, `POST /api/notifications/{id}/read/`, `POST /api/notifications/read_all/`).
@@ -92,7 +100,7 @@ app sends the current proposal back as `pending` so a spoken answer or correctio
 | POST | `/api/templates/{id}/select/` | Use this template for printing |
 | POST | `/api/voice/transcribe/` | Audio (`audio` form field) to text |
 | POST | `/api/voice/interpret/` | `{ text, bill_id, pending? }` to proposed actions (saves nothing) |
-| GET/POST | `/api/products/` | List / create product with variants |
+| GET/POST | `/api/products/` | List (or search with `?q=`) / create product with variants |
 | PATCH/DELETE | `/api/products/{id}/` | Edit product and categories (send variant `id`s to keep them) / delete |
 | POST | `/api/products/{id}/add_variant/` | Add a category |
 | POST | `/api/products/{id}/add_alias/` | Add a spoken name |

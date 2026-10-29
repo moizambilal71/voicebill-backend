@@ -2,19 +2,21 @@ import datetime
 from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
-from rest_framework import status, viewsets
+from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action, api_view, parser_classes
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
 from . import voice as voice_service
 
-from . import monitor
-from .models import Alias, Bill, BillItem, BillTemplate, Customer, Notification, PriceHistory, Product, ShopSettings, Variant
+from . import importer, monitor
+from .models import Alias, Barcode, Bill, BillItem, BillTemplate, Customer, Notification, PriceHistory, Product, ShopSettings, Variant
 from .serializers import (
     AliasSerializer,
+    BarcodeSerializer,
     BillItemSerializer,
     BillSerializer,
     BillTemplateSerializer,
@@ -23,6 +25,7 @@ from .serializers import (
     PriceHistorySerializer,
     ProductSerializer,
     ShopSettingsSerializer,
+    set_barcodes,
     VariantSerializer,
 )
 
@@ -33,17 +36,58 @@ def health(request):
 
 
 class ProductViewSet(viewsets.ModelViewSet):
-    queryset = Product.objects.prefetch_related("variants", "aliases")
+    queryset = Product.objects.prefetch_related("variants__barcodes", "aliases")
     serializer_class = ProductSerializer
+
+    def list(self, request, *args, **kwargs):
+        """Plain list by default. With ?q=, ?limit= or ?offset= it searches (name, category, spoken name,
+        barcode) and returns {count, results} so big catalogs can be paged."""
+        params = request.query_params
+        if not any(k in params for k in ("q", "limit", "offset")):
+            return super().list(request, *args, **kwargs)
+        qs = self.get_queryset()
+        q = (params.get("q") or "").strip()
+        if q:
+            qs = qs.filter(
+                Q(name__icontains=q)
+                | Q(variants__name__icontains=q)
+                | Q(aliases__text__icontains=q)
+                | Q(variants__barcodes__code__istartswith=q)
+            ).distinct()
+        try:
+            limit = min(max(int(params.get("limit", 50)), 1), 200)
+            offset = max(int(params.get("offset", 0)), 0)
+        except ValueError:
+            return Response({"detail": "limit and offset must be numbers."}, status=400)
+        count = qs.count()
+        page = qs.order_by("name", "id")[offset : offset + limit]
+        return Response({"count": count, "results": ProductSerializer(page, many=True).data})
+
+    @action(detail=False, methods=["post"], url_path="import", parser_classes=[MultiPartParser])
+    def import_file(self, request):
+        """Bulk import from CSV/Excel. Send dry_run=1 first to see what would happen, then without it to save."""
+        upload = request.FILES.get("file")
+        if upload is None:
+            return Response({"detail": "Attach a file in the 'file' field."}, status=400)
+        try:
+            rows = importer.read_rows(upload)
+        except importer.ImportFileError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        dry = str(request.data.get("dry_run", "")).lower() in ("1", "true", "yes")
+        return Response(importer.run(rows, apply=not dry))
 
     @action(detail=True, methods=["post"])
     def add_variant(self, request, pk=None):
         product = self.get_object()
         serializer = VariantSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.validated_data.pop("id", None)
-        serializer.save(product=product)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        data = dict(serializer.validated_data)
+        data.pop("id", None)
+        codes = data.pop("barcodes", [])
+        with transaction.atomic():
+            variant = Variant.objects.create(product=product, **data)
+            set_barcodes(variant, codes)
+        return Response(VariantSerializer(variant).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
     def add_alias(self, request, pk=None):
@@ -158,6 +202,36 @@ class BillViewSet(viewsets.ModelViewSet):
         response = self._fresh(bill)
         response.status_code = status.HTTP_201_CREATED
         return response
+
+    @action(detail=True, methods=["post"])
+    def scan(self, request, pk=None):
+        """A barcode / QR was scanned: add the item (or +1 if it is already on the bill)."""
+        bill = self.get_object()
+        if (err := self._editable(bill)) is not None:
+            return err
+        code = str(request.data.get("code") or "").strip()
+        if not code:
+            return Response({"detail": "Nothing was scanned."}, status=400)
+        barcode = Barcode.objects.select_related("variant__product").filter(code=code).first()
+        if barcode is None:
+            return Response(
+                {"detail": "This code is not in your catalog yet.", "code": "unknown_barcode", "barcode": code}, status=404
+            )
+        variant = barcode.variant
+        if not self._wants_ignore_stock(request):
+            problem = self._stock_problem(variant, self._wanted_on_bill(bill, variant, Decimal("1")))
+            if problem:
+                return Response({"detail": problem, "code": "out_of_stock"}, status=400)
+        line = bill.items.filter(variant=variant, price_source=BillItem.PriceSource.CATALOG).first()
+        if line:
+            line.quantity = line.quantity + 1
+            line.save(update_fields=["quantity"])
+        else:
+            serializer = BillItemSerializer(data={"variant": variant.id, "quantity": 1})
+            serializer.is_valid(raise_exception=True)
+            line = serializer.save(bill=bill)
+        fresh = self._fresh(bill).data
+        return Response({"bill": fresh, "item_name": line.item_name, "quantity": line.quantity})
 
     @action(detail=True, methods=["patch"], url_path=r"items/(?P<item_id>\d+)")
     def edit_item(self, request, pk=None, item_id=None):
@@ -387,3 +461,32 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     def read_all(self, request):
         Notification.objects.filter(read_at__isnull=True).update(read_at=timezone.now())
         return Response({"unread": 0})
+
+
+class BarcodeViewSet(mixins.CreateModelMixin, mixins.DestroyModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet):
+    """Codes linked to categories. `lookup/?code=` tells whether a scanned code is already known."""
+
+    queryset = Barcode.objects.select_related("variant__product")
+    serializer_class = BarcodeSerializer
+
+    @action(detail=False, methods=["get"])
+    def lookup(self, request):
+        code = (request.query_params.get("code") or "").strip()
+        b = self.get_queryset().filter(code=code).first() if code else None
+        if b is None:
+            return Response({"found": False, "code": code})
+        v = b.variant
+        return Response(
+            {
+                "found": True,
+                "code": code,
+                "variant": v.id,
+                "variant_name": v.name,
+                "product": v.product_id,
+                "product_name": v.product.name,
+                "price": v.price,
+                "stock": v.stock,
+                "track_stock": v.product.track_stock,
+                "unit": v.product.unit,
+            }
+        )

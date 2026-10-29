@@ -602,3 +602,183 @@ class NotificationTests(TestCase):
         self.assertEqual(self.feed()["unread"], 1)
         self.client.post(f"/api/bills/{bill.id}/reopen/")
         self.assertEqual(self.feed()["unread"], 0)
+
+
+class BarcodeTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.p = Product.objects.create(name="Lux Soap", unit="piece", track_stock=True)
+        self.v = Variant.objects.create(product=self.p, name="Standard", price=80, stock=10)
+        self.bill = Bill.objects.create()
+
+    def link(self, code="8901234567890", variant=None):
+        return self.client.post("/api/barcodes/", {"variant": (variant or self.v).id, "code": code}, format="json")
+
+    def scan(self, code, **extra):
+        return self.client.post(f"/api/bills/{self.bill.id}/scan/", {"code": code, **extra}, format="json")
+
+    def test_link_lookup_and_duplicate_rejected(self):
+        self.assertEqual(self.link().status_code, 201)
+        res = self.client.get("/api/barcodes/lookup/?code=8901234567890").json()
+        self.assertTrue(res["found"])
+        self.assertEqual((res["product_name"], float(res["price"])), ("Lux Soap", 80.0))
+        self.assertFalse(self.client.get("/api/barcodes/lookup/?code=nope").json()["found"])
+        other = Variant.objects.create(product=Product.objects.create(name="Other"), name="Standard", price=1)
+        dup = self.link(variant=other)
+        self.assertEqual(dup.status_code, 400)
+        self.assertIn("Lux Soap", str(dup.json()))
+
+    def test_scan_adds_item_at_catalog_price_then_increments(self):
+        self.link()
+        res = self.scan("8901234567890")
+        self.assertEqual(res.status_code, 200)
+        item = self.bill.items.get()
+        self.assertEqual((item.quantity, item.sold_price, item.price_source), (1, 80, "catalog"))
+        self.scan("8901234567890")
+        self.assertEqual(self.bill.items.get().quantity, 2)
+        self.assertEqual(float(res.json()["bill"]["total"]), 80.0)
+
+    def test_unknown_code_is_not_guessed(self):
+        res = self.scan("123")
+        self.assertEqual(res.status_code, 404)
+        self.assertEqual(res.json()["code"], "unknown_barcode")
+        self.assertEqual(self.bill.items.count(), 0)
+
+    def test_scan_respects_stock_and_override(self):
+        self.link()
+        self.v.stock = 1
+        self.v.save()
+        self.assertEqual(self.scan("8901234567890").status_code, 200)
+        res = self.scan("8901234567890")
+        self.assertEqual((res.status_code, res.json()["code"]), (400, "out_of_stock"))
+        self.assertEqual(self.scan("8901234567890", ignore_stock=True).status_code, 200)
+        self.assertEqual(self.bill.items.get().quantity, 2)
+
+    def test_scan_on_confirmed_bill_refused(self):
+        self.link()
+        self.scan("8901234567890")
+        self.client.post(f"/api/bills/{self.bill.id}/confirm/")
+        self.assertEqual(self.scan("8901234567890").status_code, 400)
+
+    def test_codes_through_product_create_and_edit(self):
+        res = self.client.post("/api/products/", {
+            "name": "Pen", "unit": "piece", "track_stock": False,
+            "variants": [{"name": "Blue", "price": 20, "stock": 0, "barcodes": ["P1", " P2 ", "P1"]}],
+        }, format="json")
+        self.assertEqual(res.status_code, 201, res.content)
+        v = res.json()["variants"][0]
+        self.assertEqual(sorted(v["barcodes"]), ["P1", "P2"])
+        pid = res.json()["id"]
+        res = self.client.patch(f"/api/products/{pid}/", {"variants": [{**v, "barcodes": ["P2", "P3"]}]}, format="json")
+        self.assertEqual(sorted(res.json()["variants"][0]["barcodes"]), ["P2", "P3"])
+        clash = self.client.patch(f"/api/products/{pid}/", {"variants": [{**v, "barcodes": ["8901234567890"]}]}, format="json")
+        self.assertEqual(clash.status_code, 200)  # free code
+        self.link("LUX1")
+        bad = self.client.patch(f"/api/products/{pid}/", {"variants": [{**v, "barcodes": ["LUX1"]}]}, format="json")
+        self.assertEqual(bad.status_code, 400)
+
+    def test_product_search_and_paging(self):
+        for i in range(120):
+            p = Product.objects.create(name=f"Item {i:03d}")
+            Variant.objects.create(product=p, name="Standard", price=1)
+        res = self.client.get("/api/products/?limit=50&offset=100").json()
+        self.assertEqual(res["count"], 121)
+        self.assertEqual(len(res["results"]), 21)
+        found = self.client.get("/api/products/?q=item 07").json()
+        self.assertEqual(found["count"], 10)
+        self.link("ZXC999")
+        by_code = self.client.get("/api/products/?q=ZXC9").json()
+        self.assertEqual([r["name"] for r in by_code["results"]], ["Lux Soap"])
+        self.assertIsInstance(self.client.get("/api/products/").json(), list)  # old behaviour unchanged
+
+
+class ImportTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def post(self, text, dry=False, name="p.csv"):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        f = SimpleUploadedFile(name, text.encode("utf-8"), content_type="text/csv")
+        return self.client.post("/api/products/import/", {"file": f, **({"dry_run": "1"} if dry else {})}, format="multipart")
+
+    CSV = (
+        "Name,Category,Unit,Price,Stock,Barcode\n"
+        "Daliya,Normal,kg,200,100,\n"
+        "Daliya,Medium,kg,300,50,D2\n"
+        "Lux Soap,,pcs,80,24,8901;8902\n"
+    )
+
+    def test_dry_run_changes_nothing(self):
+        res = self.post(self.CSV, dry=True).json()
+        self.assertTrue(res["dry_run"])
+        self.assertEqual((res["new_products"], res["new_categories"], res["skipped"]), (2, 3, 0))
+        self.assertEqual(Product.objects.count(), 0)
+
+    def test_import_creates_products_categories_stock_and_codes(self):
+        res = self.post(self.CSV).json()
+        self.assertEqual(res["skipped"], 0)
+        d = Product.objects.get(name="Daliya")
+        self.assertEqual(d.variants.count(), 2)
+        self.assertTrue(d.track_stock)
+        soap = Product.objects.get(name="Lux Soap").variants.get()
+        self.assertEqual((soap.name, soap.price, soap.stock), ("Standard", 80, 24))
+        self.assertEqual(sorted(soap.barcodes.values_list("code", flat=True)), ["8901", "8902"])
+
+    def test_reimport_updates_price_with_history_and_never_duplicates(self):
+        self.post(self.CSV)
+        res = self.post(self.CSV.replace("200,100", "250,90")).json()
+        self.assertEqual((res["new_products"], res["new_categories"]), (0, 0))
+        v = Variant.objects.get(product__name="Daliya", name="Normal")
+        self.assertEqual((v.price, v.stock), (250, 90))
+        self.assertEqual(v.price_history.count(), 1)
+        self.assertEqual(Product.objects.count(), 2)
+
+    def test_bad_rows_are_skipped_and_reported_good_rows_saved(self):
+        text = "name,price,barcode\nA,10,C1\nB,abc,\n,5,\nC,7,C1\nD,,\n"
+        res = self.post(text).json()
+        self.assertEqual(Product.objects.count(), 1)
+        self.assertEqual(res["skipped"], 4)
+        msgs = " | ".join(e["message"] for e in res["errors"])
+        self.assertIn("not a number", msgs)
+        self.assertIn("Name is empty", msgs)
+        self.assertIn("also used by another row", msgs)
+        self.assertIn("Price is required", msgs)
+
+    def test_code_owned_by_other_product_is_reported(self):
+        self.post("name,price,barcode\nA,10,C1\n")
+        res = self.post("name,price,barcode\nB,10,C1\n").json()
+        self.assertEqual(res["skipped"], 1)
+        self.assertIn("already belongs to A", res["errors"][0]["message"])
+
+    def test_wrong_file_and_missing_name_column(self):
+        self.assertEqual(self.post("x", name="p.pdf").status_code, 400)
+        self.assertEqual(self.post("price\n5\n").status_code, 400)
+
+    def test_excel_numbers_become_clean_codes(self):
+        from io import BytesIO
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Product", "Rate", "Barcode", "Qty"])
+        ws.append(["Biscuit", 30, 8901234567890.0, 12])
+        buf = BytesIO()
+        wb.save(buf)
+        f = SimpleUploadedFile("p.xlsx", buf.getvalue())
+        res = self.client.post("/api/products/import/", {"file": f}, format="multipart").json()
+        self.assertEqual(res["skipped"], 0, res)
+        self.assertEqual(Variant.objects.get(product__name="Biscuit").barcodes.get().code, "8901234567890")
+
+
+class VoiceCatalogScaleTests(TestCase):
+    def test_big_catalog_is_narrowed_to_matching_products(self):
+        from shop import voice
+        for i in range(400):
+            p = Product.objects.create(name=f"Thing{i}")
+            Variant.objects.create(product=p, name="Standard", price=1)
+        target = Product.objects.create(name="Sugar")
+        Variant.objects.create(product=target, name="Standard", price=150)
+        ctx = voice._catalog_context("aadha kilo sugar do", None, None)
+        names = [c["name"] for c in ctx]
+        self.assertIn("Sugar", names)
+        self.assertLess(len(names), 20)

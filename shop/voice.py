@@ -7,6 +7,7 @@ calls the normal API endpoints after the shopkeeper confirms.
 """
 
 import json
+import re
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
@@ -121,9 +122,36 @@ def _chat_json(messages):
     return json.loads(resp.choices[0].message.content or "{}")
 
 
-def _catalog_context():
+CATALOG_FULL_LIMIT = 200  # up to this many products are sent whole; bigger catalogs are narrowed down
+CATALOG_MATCH_LIMIT = 150
+
+
+def _relevant_products(text, bill, pending):
+    """For big catalogs only send the products that the sentence (or the open bill/proposal) could be about."""
+    products = list(Product.objects.prefetch_related("variants", "aliases"))
+    if len(products) <= CATALOG_FULL_LIMIT:
+        return products
+    tokens = {t for t in re.findall(r"\w+", (text or "").lower()) if len(t) >= 2}
+    keep_ids = set()
+    if bill:
+        keep_ids |= {i.variant.product_id for i in bill.items.select_related("variant") if i.variant}
+    for action in pending if isinstance(pending, list) else []:
+        for item in (action.get("items") or []) if isinstance(action, dict) else []:
+            if isinstance(item, dict) and isinstance(item.get("product_id"), int):
+                keep_ids.add(item["product_id"])
+        if isinstance(action, dict) and isinstance(action.get("product_id"), int):
+            keep_ids.add(action["product_id"])
+    matched = []
+    for p in products:
+        hay = " ".join([p.name] + [a.text for a in p.aliases.all()] + [v.name for v in p.variants.all()]).lower()
+        if p.id in keep_ids or any(t in hay for t in tokens):
+            matched.append(p)
+    return matched[:CATALOG_MATCH_LIMIT] or products[:CATALOG_MATCH_LIMIT]
+
+
+def _catalog_context(text="", bill=None, pending=None):
     out = []
-    for p in Product.objects.prefetch_related("variants", "aliases"):
+    for p in _relevant_products(text, bill, pending):
         out.append({
             "product_id": p.id,
             "name": p.name,
@@ -163,7 +191,7 @@ def interpret(text, bill=None, pending=None):
         raise VoiceError("Nothing was heard. Please try again.")
     payload = {
         "spoken_text": text,
-        "catalog": _catalog_context(),
+        "catalog": _catalog_context(text, bill, pending),
         "current_bill": _bill_context(bill),
         "pending_proposal": pending if isinstance(pending, list) else [],
     }

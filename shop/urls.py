@@ -9,6 +9,7 @@ router.register("variants", views.VariantViewSet)
 router.register("customers", views.CustomerViewSet)
 router.register("bills", views.BillViewSet)
 router.register("templates", views.BillTemplateViewSet)
+router.register("barcodes", views.BarcodeViewSet)
 router.register("notifications", views.NotificationViewSet)
 
 urlpatterns = [
