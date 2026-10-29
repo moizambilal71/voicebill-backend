@@ -35,6 +35,20 @@ def health(request):
     return Response({"status": "ok", "service": "voicebill-backend"})
 
 
+@api_view(["GET"])
+def summary(request):
+    """Numbers for the home page cards. "Today" follows the shop's timezone."""
+    today = timezone.localdate()
+    sold = Bill.objects.filter(status=Bill.Status.CONFIRMED, confirmed_at__date=today).prefetch_related("items")
+    return Response(
+        {
+            "today_sales": sum((b.total for b in sold), Decimal("0")),
+            "bills_today": Bill.objects.filter(created_at__date=today).exclude(status=Bill.Status.CANCELLED).count(),
+            "out_of_stock": Variant.objects.filter(product__track_stock=True, stock__lte=0).count(),
+        }
+    )
+
+
 class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.prefetch_related("variants__barcodes", "aliases")
     serializer_class = ProductSerializer

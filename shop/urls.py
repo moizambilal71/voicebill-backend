@@ -14,6 +14,7 @@ router.register("notifications", views.NotificationViewSet)
 
 urlpatterns = [
     path("health/", views.health),
+    path("summary/", views.summary),
     path("settings/", views.shop_settings),
     path("voice/transcribe/", views.voice_transcribe),
     path("voice/interpret/", views.voice_interpret),

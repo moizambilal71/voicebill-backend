@@ -835,3 +835,19 @@ class AddStockTests(TestCase):
         self.add(5)
         self.v.refresh_from_db()
         self.assertFalse(self.v.out_of_stock_notified)
+
+
+class SummaryTests(TestCase):
+    def test_numbers_for_the_home_cards(self):
+        client = APIClient()
+        p = Product.objects.create(name="Pen", unit="piece", track_stock=True)
+        v = Variant.objects.create(product=p, name="Standard", price=20, stock=5)
+        Variant.objects.create(product=Product.objects.create(name="Gone", track_stock=True), name="Standard", price=1, stock=0)
+        sold = Bill.objects.create()
+        client.post(f"/api/bills/{sold.id}/add_item/", {"variant": v.id, "quantity": 2}, format="json")
+        client.post(f"/api/bills/{sold.id}/confirm/")
+        Bill.objects.create()  # a draft today
+        res = client.get("/api/summary/").json()
+        self.assertEqual(float(res["today_sales"]), 40.0)
+        self.assertEqual(res["bills_today"], 2)
+        self.assertEqual(res["out_of_stock"], 1)
