@@ -851,3 +851,13 @@ class SummaryTests(TestCase):
         self.assertEqual(float(res["today_sales"]), 40.0)
         self.assertEqual(res["bills_today"], 2)
         self.assertEqual(res["out_of_stock"], 1)
+
+
+class DarkModeSettingTests(TestCase):
+    def test_dark_by_default_and_saved_for_the_whole_shop(self):
+        client = APIClient()
+        self.assertTrue(client.get("/api/settings/").json()["dark_mode"])
+        self.assertEqual(client.patch("/api/settings/", {"dark_mode": False}, format="json").status_code, 200)
+        self.assertFalse(APIClient().get("/api/settings/").json()["dark_mode"])  # another device sees it
+        client.patch("/api/settings/", {"shop_name": "Ali"}, format="json")  # other edits keep it
+        self.assertFalse(client.get("/api/settings/").json()["dark_mode"])

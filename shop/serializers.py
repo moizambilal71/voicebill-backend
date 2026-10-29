@@ -215,7 +215,7 @@ class BillSerializer(serializers.ModelSerializer):
 class ShopSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = ShopSettings
-        fields = ["language", "shop_name", "shop_address", "shop_phone", "reminder_days"]
+        fields = ["language", "shop_name", "shop_address", "shop_phone", "reminder_days", "dark_mode"]
         extra_kwargs = {"reminder_days": {"min_value": 1, "max_value": 30}}
 
 

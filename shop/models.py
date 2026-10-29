@@ -192,6 +192,8 @@ class ShopSettings(models.Model):
     shop_phone = models.CharField(max_length=50, blank=True)
     # How often the "you still have out-of-stock items" reminder is sent.
     reminder_days = models.PositiveSmallIntegerField(default=3)
+    # App colours: True = dark, False = light. Stored here so a PC and a phone always agree.
+    dark_mode = models.BooleanField(default=True)
 
     class Meta:
         verbose_name_plural = "shop settings"
