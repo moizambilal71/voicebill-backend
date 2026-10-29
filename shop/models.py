@@ -208,6 +208,10 @@ class BillTemplate(models.Model):
         MINIMAL = "minimal", "Minimal"
         MODERN = "modern", "Modern coral (A4 design)"
         BOUTIQUE = "boutique", "Boutique emerald (A4 design)"
+        ROYAL = "royal", "Royal navy & gold (A4 design)"
+        SUNSET = "sunset", "Sunset glow (A4 design)"
+        NOIR = "noir", "Noir luxe (A4 design)"
+        TICKET = "ticket", "Ticket pro (thermal design)"
 
     class FontSize(models.TextChoices):
         SMALL = "small", "Small"

@@ -67,7 +67,7 @@ python manage.py runserver
 
 - `ShopSettings` (one record): bill language (`en`, `ur`, `roman`, `both` = Urdu + English) and the shop name, address and phone printed on bills.
 - `BillTemplate`: paper (`58mm`, `80mm`, `a4`), layout (`receipt`, `invoice`, `minimal`), text size, header and footer line, and show/hide options (customer, date, units, discount, item numbers).
-- Layouts: `receipt`, `invoice`, `minimal`, plus the A4 designs `modern` and `boutique` (two ready-made templates of these are added by migration 0005; they are editable and deletable).
+- Layouts: `receipt`, `invoice`, `minimal`, plus the designed layouts `modern`, `boutique`, `royal`, `sunset`, `noir` (A4) and `ticket` (80 mm). Ready-made templates of them are added by migrations 0005 and 0006; they are editable and deletable.
 - A built-in **Default receipt** template always exists. It cannot be edited or deleted. Users add their own templates.
 - Exactly one template is selected. If the selected one is deleted, the default becomes selected again.
 

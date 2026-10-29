@@ -185,12 +185,13 @@ class SettingsAndTemplateTests(TestCase):
 
     def test_default_template_exists_and_is_selected(self):
         items = self.templates()
-        self.assertEqual(len(items), 3)  # default + the two ready-made A4 designs
+        self.assertEqual(len(items), 7)  # default + the six ready-made designs
         self.assertTrue(items[0]["is_default"])
         self.assertTrue(items[0]["is_selected"])
         designs = {t["layout"]: t for t in items if not t["is_default"]}
-        self.assertEqual(set(designs), {"modern", "boutique"})
-        self.assertTrue(all(t["paper_size"] == "a4" for t in designs.values()))
+        self.assertEqual(set(designs), {"modern", "boutique", "royal", "sunset", "noir", "ticket"})
+        self.assertTrue(all(t["paper_size"] == "a4" for k, t in designs.items() if k != "ticket"))
+        self.assertEqual(designs["ticket"]["paper_size"], "80mm")
 
     def test_add_templates_and_select(self):
         self.templates()
@@ -198,7 +199,7 @@ class SettingsAndTemplateTests(TestCase):
         b = self.client.post("/api/templates/", {"name": "Small roll", "paper_size": "58mm"}, format="json")
         self.assertEqual((a.status_code, b.status_code), (201, 201))
         self.assertFalse(a.json()["is_selected"])  # new templates don't steal the selection
-        self.assertEqual(len(self.templates()), 5)
+        self.assertEqual(len(self.templates()), 9)
 
         self.client.post(f"/api/templates/{b.json()['id']}/select/")
         selected = [t["name"] for t in self.templates() if t["is_selected"]]
@@ -214,7 +215,7 @@ class SettingsAndTemplateTests(TestCase):
         self.client.post(f"/api/templates/{t['id']}/select/")
         self.assertEqual(self.client.delete(f"/api/templates/{t['id']}/").status_code, 204)
         items = self.templates()
-        self.assertEqual(len(items), 3)
+        self.assertEqual(len(items), 7)
         self.assertTrue(items[0]["is_default"] and items[0]["is_selected"])
 
     def test_default_cannot_be_deleted_or_edited(self):
