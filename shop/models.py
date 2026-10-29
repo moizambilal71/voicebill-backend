@@ -40,6 +40,8 @@ class Variant(models.Model):
     name = models.CharField(max_length=100, default="Standard")
     price = models.DecimalField(max_digits=12, decimal_places=2)
     stock = models.DecimalField(max_digits=12, decimal_places=3, default=Decimal("0"))
+    # True while an "out of stock" notification is active for this category (reset when it is restocked).
+    out_of_stock_notified = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["product__name", "price"]
@@ -174,6 +176,8 @@ class ShopSettings(models.Model):
     shop_name = models.CharField(max_length=200, blank=True)
     shop_address = models.CharField(max_length=300, blank=True)
     shop_phone = models.CharField(max_length=50, blank=True)
+    # How often the "you still have out-of-stock items" reminder is sent.
+    reminder_days = models.PositiveSmallIntegerField(default=3)
 
     class Meta:
         verbose_name_plural = "shop settings"
@@ -244,3 +248,26 @@ class BillTemplate(models.Model):
             BillTemplate.objects.exclude(pk=self.pk).update(is_selected=False)
             self.is_selected = True
             self.save(update_fields=["is_selected"])
+
+
+class Notification(models.Model):
+    """A message for the shopkeeper, shown under the bell icon."""
+
+    class Kind(models.TextChoices):
+        OUT_OF_STOCK = "out_of_stock", "Out of stock"
+        REMINDER = "reminder", "Stock reminder"
+
+    kind = models.CharField(max_length=20, choices=Kind.choices)
+    title = models.CharField(max_length=200)
+    message = models.CharField(max_length=500, blank=True)
+    variant = models.ForeignKey(
+        Variant, related_name="notifications", on_delete=models.CASCADE, null=True, blank=True
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return self.title

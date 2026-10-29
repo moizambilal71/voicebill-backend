@@ -11,13 +11,15 @@ from rest_framework.response import Response
 
 from . import voice as voice_service
 
-from .models import Alias, Bill, BillItem, BillTemplate, Customer, PriceHistory, Product, ShopSettings, Variant
+from . import monitor
+from .models import Alias, Bill, BillItem, BillTemplate, Customer, Notification, PriceHistory, Product, ShopSettings, Variant
 from .serializers import (
     AliasSerializer,
     BillItemSerializer,
     BillSerializer,
     BillTemplateSerializer,
     CustomerSerializer,
+    NotificationSerializer,
     PriceHistorySerializer,
     ProductSerializer,
     ShopSettingsSerializer,
@@ -218,9 +220,12 @@ class BillViewSet(viewsets.ModelViewSet):
                     v.save(update_fields=["stock"])
                     item.stock_deducted = taken
                     item.save(update_fields=["stock_deducted"])
+            touched = {i.variant for i in bill.items.select_related("variant__product") if i.variant}
             bill.status = Bill.Status.CONFIRMED
             bill.confirmed_at = timezone.now()
             bill.save(update_fields=["status", "confirmed_at"])
+        for variant in touched:
+            monitor.sync_variant(variant)  # raises the "out of stock" notification right away
         return Response(BillSerializer(bill).data)
 
     @staticmethod
@@ -232,6 +237,7 @@ class BillViewSet(viewsets.ModelViewSet):
                 v.save(update_fields=["stock"])
                 item.stock_deducted = Decimal("0")
                 item.save(update_fields=["stock_deducted"])
+                monitor.sync_variant(v)  # restocked -> clear the alert
 
     @action(detail=True, methods=["post"])
     def reopen(self, request, pk=None):
@@ -351,3 +357,33 @@ class BillTemplateViewSet(viewsets.ModelViewSet):
         template = self.get_object()
         template.select()
         return Response(BillTemplateSerializer(template).data)
+
+
+class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+    """The bell icon. `list` returns {"unread": n, "items": [...]} (latest 50)."""
+
+    queryset = Notification.objects.all()
+    serializer_class = NotificationSerializer
+
+    def list(self, request, *args, **kwargs):
+        monitor.sync_all()  # stock may have been edited by hand; keep the bell truthful
+        items = Notification.objects.all()[:50]
+        return Response(
+            {
+                "unread": Notification.objects.filter(read_at__isnull=True).count(),
+                "items": NotificationSerializer(items, many=True).data,
+            }
+        )
+
+    @action(detail=True, methods=["post"])
+    def read(self, request, pk=None):
+        n = self.get_object()
+        if n.read_at is None:
+            n.read_at = timezone.now()
+            n.save(update_fields=["read_at"])
+        return Response(NotificationSerializer(n).data)
+
+    @action(detail=False, methods=["post"])
+    def read_all(self, request):
+        Notification.objects.filter(read_at__isnull=True).update(read_at=timezone.now())
+        return Response({"unread": 0})

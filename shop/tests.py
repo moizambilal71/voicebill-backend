@@ -6,7 +6,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from .models import Alias, Bill, BillItem, Product, Variant
+from .models import Alias, Bill, BillItem, Notification, Product, Variant
 
 
 class VoiceInterpretTests(TestCase):
@@ -509,3 +509,92 @@ class StockLimitTests(TestCase):
         self.p.track_stock = False
         self.p.save()
         self.assertEqual(self.add(500).status_code, 201)
+
+
+class NotificationTests(TestCase):
+    def setUp(self):
+        from django.utils import timezone
+        self.now = timezone.now()
+        self.client = APIClient()
+        self.p = Product.objects.create(name="Sugar", unit="kg", track_stock=True)
+        self.v = Variant.objects.create(product=self.p, name="Standard", price=150, stock=2)
+
+    def feed(self):
+        res = self.client.get("/api/notifications/")
+        self.assertEqual(res.status_code, 200)
+        return res.json()
+
+    def sell_all(self):
+        bill = Bill.objects.create()
+        BillItem.objects.create(bill=bill, variant=self.v, item_name="Sugar", quantity=2, sold_price=150)
+        self.assertEqual(self.client.post(f"/api/bills/{bill.id}/confirm/").status_code, 200)
+        return bill
+
+    def test_nothing_when_in_stock(self):
+        self.assertEqual(self.feed(), {"unread": 0, "items": []})
+
+    def test_selling_last_unit_raises_out_of_stock_notification_once(self):
+        self.sell_all()
+        data = self.feed()
+        self.assertEqual(data["unread"], 1)
+        self.assertEqual(data["items"][0]["kind"], "out_of_stock")
+        self.assertIn("Sugar is out of stock", data["items"][0]["title"])
+        self.assertEqual(self.feed()["unread"], 1)  # polling does not duplicate it
+
+    def test_stock_edited_to_zero_by_hand_is_noticed(self):
+        self.v.stock = 0
+        self.v.save()
+        self.assertEqual(self.feed()["unread"], 1)
+
+    def test_restock_clears_the_alert_and_a_new_one_can_come(self):
+        self.sell_all()
+        Variant.objects.filter(pk=self.v.pk).update(stock=10)
+        self.assertEqual(self.feed()["unread"], 0)
+        Variant.objects.filter(pk=self.v.pk).update(stock=0)
+        self.assertEqual(self.feed()["unread"], 1)
+
+    def test_mark_read_and_read_all(self):
+        self.sell_all()
+        nid = self.feed()["items"][0]["id"]
+        self.assertTrue(self.client.post(f"/api/notifications/{nid}/read/").json()["is_read"])
+        self.assertEqual(self.feed()["unread"], 0)
+        self.assertEqual(self.client.post("/api/notifications/read_all/").json(), {"unread": 0})
+
+    def test_untracked_products_never_notify(self):
+        self.p.track_stock = False
+        self.p.save()
+        self.v.stock = 0
+        self.v.save()
+        self.assertEqual(self.feed()["unread"], 0)
+
+    def test_reminder_every_n_days_while_still_out_of_stock(self):
+        from datetime import timedelta
+        from shop import monitor
+        self.v.stock = 0
+        self.v.save()
+        monitor.run_checks(self.now)                      # raises the alert, too early for a reminder
+        self.assertEqual(Notification.objects.filter(kind="reminder").count(), 0)
+        monitor.run_checks(self.now + timedelta(days=2))   # reminder_days defaults to 3
+        self.assertEqual(Notification.objects.filter(kind="reminder").count(), 0)
+        monitor.run_checks(self.now + timedelta(days=3, minutes=1))
+        r = Notification.objects.get(kind="reminder")
+        self.assertIn("Sugar", r.message)
+        monitor.run_checks(self.now + timedelta(days=4))   # not again right away
+        self.assertEqual(Notification.objects.filter(kind="reminder").count(), 1)
+
+    def test_no_reminder_when_everything_is_in_stock(self):
+        from datetime import timedelta
+        from shop import monitor
+        monitor.run_checks(self.now + timedelta(days=30))
+        self.assertEqual(Notification.objects.count(), 0)
+
+    def test_reminder_days_setting(self):
+        res = self.client.patch("/api/settings/", {"reminder_days": 4}, format="json")
+        self.assertEqual(res.json()["reminder_days"], 4)
+        self.assertEqual(self.client.patch("/api/settings/", {"reminder_days": 0}, format="json").status_code, 400)
+
+    def test_reopening_a_bill_clears_the_alert(self):
+        bill = self.sell_all()
+        self.assertEqual(self.feed()["unread"], 1)
+        self.client.post(f"/api/bills/{bill.id}/reopen/")
+        self.assertEqual(self.feed()["unread"], 0)

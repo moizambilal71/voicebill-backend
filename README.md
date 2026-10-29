@@ -56,6 +56,13 @@ python manage.py runserver
 6. Stock is reduced only when a bill is confirmed, and only for products with `track_stock = true`.
 7. Stock never goes below 0. `add_item`, `edit_item` and `confirm` reject more than the stock (`code: out_of_stock`) unless the request has `"ignore_stock": true`. Each line remembers what it really took (`stock_deducted`), so reopening or deleting a bill gives back exactly that. Run `python manage.py migrate` (also sets any old negative stock to 0).
 
+## Notifications and stock monitor
+
+- The bell icon in the app shows `Notification` records (`GET /api/notifications/` -> `{unread, items}`, `POST /api/notifications/{id}/read/`, `POST /api/notifications/read_all/`).
+- **Out of stock alert**: created the moment a tracked item reaches 0 (bill confirmed, or stock edited by hand); cleared automatically when it is restocked. One alert per item, never duplicated.
+- **Reminder**: while anything is still out of stock, one summary notification every `reminder_days` days (default 3, change it in Settings).
+- **Background monitor**: starts automatically with `python manage.py runserver` and checks every 5 minutes (`STOCK_CHECK_INTERVAL_SECONDS`, turn off with `STOCK_MONITOR=0`). Without runserver (production), run `python manage.py check_stock --loop` as a service, or `python manage.py check_stock` from cron / Task Scheduler.
+
 ## Settings and bill templates
 
 - `ShopSettings` (one record): bill language (`en`, `ur`, `roman`, `both` = Urdu + English) and the shop name, address and phone printed on bills.

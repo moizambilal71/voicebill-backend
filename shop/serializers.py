@@ -2,7 +2,7 @@ from django.db import IntegrityError, transaction
 from rest_framework import serializers
 
 from .models import (
-    Alias, Bill, BillItem, BillTemplate, Customer, PriceHistory, Product, ShopSettings, Variant,
+    Alias, Bill, BillItem, BillTemplate, Customer, Notification, PriceHistory, Product, ShopSettings, Variant,
 )
 
 
@@ -155,7 +155,8 @@ class BillSerializer(serializers.ModelSerializer):
 class ShopSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = ShopSettings
-        fields = ["language", "shop_name", "shop_address", "shop_phone"]
+        fields = ["language", "shop_name", "shop_address", "shop_phone", "reminder_days"]
+        extra_kwargs = {"reminder_days": {"min_value": 1, "max_value": 30}}
 
 
 class BillTemplateSerializer(serializers.ModelSerializer):
@@ -173,3 +174,14 @@ class BillTemplateSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError("Template needs a name.")
         return value
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    is_read = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Notification
+        fields = ["id", "kind", "title", "message", "variant", "created_at", "is_read"]
+
+    def get_is_read(self, obj):
+        return obj.read_at is not None
