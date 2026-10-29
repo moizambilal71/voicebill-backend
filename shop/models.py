@@ -206,6 +206,8 @@ class BillTemplate(models.Model):
         RECEIPT = "receipt", "Receipt"
         INVOICE = "invoice", "Invoice table"
         MINIMAL = "minimal", "Minimal"
+        MODERN = "modern", "Modern coral (A4 design)"
+        BOUTIQUE = "boutique", "Boutique emerald (A4 design)"
 
     class FontSize(models.TextChoices):
         SMALL = "small", "Small"
