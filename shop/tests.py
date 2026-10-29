@@ -634,9 +634,28 @@ class BarcodeTests(TestCase):
         self.assertEqual(res.status_code, 200)
         item = self.bill.items.get()
         self.assertEqual((item.quantity, item.sold_price, item.price_source), (1, 80, "catalog"))
-        self.scan("8901234567890")
-        self.assertEqual(self.bill.items.get().quantity, 2)
         self.assertEqual(float(res.json()["bill"]["total"]), 80.0)
+
+    def test_second_scan_asks_first_and_adds_only_when_confirmed(self):
+        self.link()
+        self.scan("8901234567890")
+        again = self.scan("8901234567890")
+        self.assertEqual((again.status_code, again.json()["code"]), (409, "already_on_bill"))
+        self.assertEqual(again.json()["quantity"], 1)
+        self.assertEqual(self.bill.items.get().quantity, 1)  # nothing changed
+        ok = self.scan("8901234567890", repeat_ok=True)
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(self.bill.items.get().quantity, 2)
+        self.scan("8901234567890", repeat_ok=True, quantity=3)
+        self.assertEqual(self.bill.items.get().quantity, 5)
+        self.assertEqual(self.scan("8901234567890", repeat_ok=True, quantity=0).status_code, 400)
+
+    def test_repeat_confirmation_still_respects_stock(self):
+        self.link()
+        self.scan("8901234567890")
+        res = self.scan("8901234567890", repeat_ok=True, quantity=20)  # stock is 10
+        self.assertEqual((res.status_code, res.json()["code"]), (400, "out_of_stock"))
+        self.assertEqual(self.bill.items.get().quantity, 1)
 
     def test_unknown_code_is_not_guessed(self):
         res = self.scan("123")
@@ -651,7 +670,7 @@ class BarcodeTests(TestCase):
         self.assertEqual(self.scan("8901234567890").status_code, 200)
         res = self.scan("8901234567890")
         self.assertEqual((res.status_code, res.json()["code"]), (400, "out_of_stock"))
-        self.assertEqual(self.scan("8901234567890", ignore_stock=True).status_code, 200)
+        self.assertEqual(self.scan("8901234567890", ignore_stock=True, repeat_ok=True).status_code, 200)
         self.assertEqual(self.bill.items.get().quantity, 2)
 
     def test_scan_on_confirmed_bill_refused(self):

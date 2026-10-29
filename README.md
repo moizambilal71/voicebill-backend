@@ -60,6 +60,7 @@ python manage.py runserver
 
 - `Barcode` links a scanned text (EAN, QR or any custom code) to one category (variant). A category can have several codes; one code never belongs to two items.
 - `POST /api/bills/{id}/scan/ {code}` adds the item at its catalog price, or +1 when it is already on the bill (stock check and `ignore_stock` work as for any line). Unknown code: `404 {code: "unknown_barcode"}`. Stock itself still drops only when the bill is confirmed.
+- `POST /api/bills/{id}/scan/ {code, quantity?, repeat_ok?, ignore_stock?}` — adds the item. If it is already on the bill the answer is 409 `already_on_bill` (nothing changes) until the client resends with `repeat_ok: true`.
 - `GET /api/barcodes/lookup/?code=`, `POST /api/barcodes/ {variant, code}`, `DELETE /api/barcodes/{id}/`. Codes can also be sent inside `variants[].barcodes` when creating/editing a product.
 - `POST /api/variants/{id}/add_stock/ {quantity}` — goods arrived: adds to stock (quantity > 0), turns stock tracking on if it was off and clears any out-of-stock alert.
 - Big catalogs: `GET /api/products/?q=&limit=&offset=` searches name, category, spoken name and barcode and returns `{count, results}` (without these params you get the plain list as before). Voice only sends the AI the products that match what was said once the catalog has more than 200 items.

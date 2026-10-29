@@ -223,7 +223,8 @@ class BillViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def scan(self, request, pk=None):
-        """A barcode / QR was scanned: add the item (or +1 if it is already on the bill)."""
+        """A barcode / QR was scanned: add the item. If it is already on the bill, answer 409 `already_on_bill`
+        unless the shopkeeper confirmed (`repeat_ok`). `quantity` (default 1) lets the confirmation add several."""
         bill = self.get_object()
         if (err := self._editable(bill)) is not None:
             return err
@@ -236,16 +237,36 @@ class BillViewSet(viewsets.ModelViewSet):
                 {"detail": "This code is not in your catalog yet.", "code": "unknown_barcode", "barcode": code}, status=404
             )
         variant = barcode.variant
+        try:
+            qty = Decimal(str(request.data.get("quantity", 1)))
+        except (InvalidOperation, TypeError):
+            return Response({"quantity": "A valid quantity is required."}, status=400)
+        if not qty.is_finite() or qty <= 0:
+            return Response({"quantity": "Quantity must be more than 0."}, status=400)
         if not self._wants_ignore_stock(request):
-            problem = self._stock_problem(variant, self._wanted_on_bill(bill, variant, Decimal("1")))
+            problem = self._stock_problem(variant, self._wanted_on_bill(bill, variant, qty))
             if problem:
                 return Response({"detail": problem, "code": "out_of_stock"}, status=400)
+        # Same item scanned again: ask first, so a double scan (or a re-try after a missed beep) is not counted twice.
+        on_bill = bill.items.filter(variant=variant)
+        repeat_ok = str(request.data.get("repeat_ok", "")).lower() in ("1", "true", "yes")
+        if on_bill.exists() and not repeat_ok:
+            quantity = sum(i.quantity for i in on_bill)
+            return Response(
+                {
+                    "detail": f"{variant.product.name} is already on this bill (quantity {quantity:g}). Add it again?",
+                    "code": "already_on_bill",
+                    "item_name": on_bill.first().item_name,
+                    "quantity": quantity,
+                },
+                status=409,
+            )
         line = bill.items.filter(variant=variant, price_source=BillItem.PriceSource.CATALOG).first()
         if line:
-            line.quantity = line.quantity + 1
+            line.quantity = line.quantity + qty
             line.save(update_fields=["quantity"])
         else:
-            serializer = BillItemSerializer(data={"variant": variant.id, "quantity": 1})
+            serializer = BillItemSerializer(data={"variant": variant.id, "quantity": qty})
             serializer.is_valid(raise_exception=True)
             line = serializer.save(bill=bill)
         fresh = self._fresh(bill).data
