@@ -782,3 +782,37 @@ class VoiceCatalogScaleTests(TestCase):
         names = [c["name"] for c in ctx]
         self.assertIn("Sugar", names)
         self.assertLess(len(names), 20)
+
+
+class AddStockTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.p = Product.objects.create(name="Rio", unit="piece", track_stock=False)
+        self.v = Variant.objects.create(product=self.p, name="Strawberry", price=30, stock=0)
+
+    def add(self, qty):
+        return self.client.post(f"/api/variants/{self.v.id}/add_stock/", {"quantity": qty}, format="json")
+
+    def test_adds_and_starts_tracking(self):
+        res = self.add(40)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(float(res.json()["stock"]), 40.0)
+        self.add("10.5")
+        self.v.refresh_from_db()
+        self.p.refresh_from_db()
+        self.assertEqual(float(self.v.stock), 50.5)
+        self.assertTrue(self.p.track_stock)
+
+    def test_rejects_bad_quantity(self):
+        for bad in (0, -5, "abc", None, "NaN"):
+            self.assertEqual(self.add(bad).status_code, 400, bad)
+        self.v.refresh_from_db()
+        self.assertEqual(self.v.stock, 0)
+
+    def test_restock_clears_out_of_stock_alert(self):
+        Product.objects.filter(pk=self.p.pk).update(track_stock=True)
+        self.client.get("/api/notifications/")
+        self.assertEqual(self.client.get("/api/notifications/").json()["unread"], 1)
+        self.add(5)
+        self.v.refresh_from_db()
+        self.assertFalse(self.v.out_of_stock_notified)

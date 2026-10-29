@@ -2,7 +2,7 @@ import datetime
 from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import F, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
@@ -122,6 +122,24 @@ class VariantViewSet(viewsets.ReadOnlyModelViewSet):
             )
             variant.price = new_price
             variant.save(update_fields=["price"])
+        return Response(VariantSerializer(variant).data)
+
+    @action(detail=True, methods=["post"])
+    def add_stock(self, request, pk=None):
+        """Goods arrived: add a quantity to this category's stock (and start tracking stock if it was off)."""
+        variant = self.get_object()
+        try:
+            qty = Decimal(str(request.data.get("quantity")))
+        except (InvalidOperation, TypeError):
+            return Response({"quantity": "A valid quantity is required."}, status=400)
+        if not qty.is_finite() or qty <= 0:
+            return Response({"quantity": "Quantity must be more than 0."}, status=400)
+        with transaction.atomic():
+            Variant.objects.filter(pk=variant.pk).update(stock=F("stock") + qty)
+            if not variant.product.track_stock:
+                Product.objects.filter(pk=variant.product_id).update(track_stock=True)
+        monitor.sync_variant(variant)
+        variant.refresh_from_db()
         return Response(VariantSerializer(variant).data)
 
     @action(detail=True, methods=["get"])
