@@ -861,3 +861,17 @@ class DarkModeSettingTests(TestCase):
         self.assertFalse(APIClient().get("/api/settings/").json()["dark_mode"])  # another device sees it
         client.patch("/api/settings/", {"shop_name": "Ali"}, format="json")  # other edits keep it
         self.assertFalse(client.get("/api/settings/").json()["dark_mode"])
+
+
+class BillPagingTests(TestCase):
+    def test_limit_and_offset_page_newest_first(self):
+        client = APIClient()
+        ids = [Bill.objects.create(customer_name=f"c{i}").id for i in range(12)]
+        first = client.get("/api/bills/?limit=5").json()
+        self.assertEqual(first["count"], 12)
+        self.assertEqual([b["id"] for b in first["results"]], ids[::-1][:5])
+        more = client.get("/api/bills/?limit=10&offset=5").json()
+        self.assertEqual([b["id"] for b in more["results"]], ids[::-1][5:12])
+        self.assertEqual(client.get("/api/bills/?limit=5&q=c1").json()["count"], 3)  # c1, c10, c11
+        self.assertEqual(len(client.get("/api/bills/").json()), 12)  # plain list unchanged
+        self.assertEqual(client.get("/api/bills/?limit=x").status_code, 400)

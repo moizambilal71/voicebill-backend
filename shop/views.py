@@ -189,6 +189,21 @@ class BillViewSet(viewsets.ModelViewSet):
                     pass
         return qs
 
+    def list(self, request, *args, **kwargs):
+        """Plain list by default. With ?limit= / ?offset= it returns {count, results} (newest first) so the home page
+        can show 5 bills and load more on demand. ?q= and the date filters work in both modes."""
+        params = request.query_params
+        if "limit" not in params and "offset" not in params:
+            return super().list(request, *args, **kwargs)
+        try:
+            limit = min(max(int(params.get("limit", 5)), 1), 100)
+            offset = max(int(params.get("offset", 0)), 0)
+        except ValueError:
+            return Response({"detail": "limit and offset must be numbers."}, status=400)
+        qs = self.get_queryset()
+        page = qs[offset : offset + limit]
+        return Response({"count": qs.count(), "results": BillSerializer(page, many=True).data})
+
     def _fresh(self, bill):
         """Re-read the bill so the response reflects the latest items."""
         return Response(BillSerializer(self.get_queryset().get(pk=bill.pk)).data)
