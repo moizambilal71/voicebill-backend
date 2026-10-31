@@ -272,3 +272,27 @@ class SubscriptionTests(AuthBase):
     def test_demo_upgrade_switches_to_pro(self):
         self.sign_up_and_verify()
         self.assertEqual(self.post("/api/auth/subscription/upgrade/").json()["plan"], "pro")
+
+
+class BrevoBackendTests(TestCase):
+    def test_posts_to_brevo_with_the_key_and_never_leaks_it(self):
+        from unittest.mock import MagicMock
+        from django.core.mail import send_mail
+        ok = MagicMock(status_code=201)
+        with self.settings(EMAIL_BACKEND="accounts.brevo.BrevoEmailBackend", BREVO_API_KEY="k-123",
+                           DEFAULT_FROM_EMAIL="VoiceBill <me@example.com>"), \
+                patch("accounts.brevo.requests.post", return_value=ok) as post:
+            self.assertEqual(send_mail("Subj", "Body 123456", None, ["to@example.com"]), 1)
+        kw = post.call_args.kwargs
+        self.assertEqual(kw["headers"]["api-key"], "k-123")
+        self.assertEqual(kw["json"]["sender"], {"email": "me@example.com", "name": "VoiceBill"})
+        self.assertEqual(kw["json"]["to"], [{"email": "to@example.com"}])
+
+    def test_refusal_is_an_error(self):
+        from unittest.mock import MagicMock
+        from django.core.mail import send_mail
+        bad = MagicMock(status_code=400, text="sender not valid")
+        with self.settings(EMAIL_BACKEND="accounts.brevo.BrevoEmailBackend", BREVO_API_KEY="k"), \
+                patch("accounts.brevo.requests.post", return_value=bad):
+            with self.assertRaises(RuntimeError):
+                send_mail("S", "B", "a@example.com", ["b@example.com"])
