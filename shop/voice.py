@@ -33,10 +33,10 @@ def _client():
     return OpenAI(api_key=settings.OPENAI_API_KEY, timeout=60, max_retries=1)
 
 
-def transcribe(filename, data, content_type):
+def transcribe(shop, filename, data, content_type):
     """Audio bytes -> text."""
     hint_names = []
-    for p in Product.objects.prefetch_related("aliases", "variants")[:80]:
+    for p in Product.objects.filter(shop=shop).prefetch_related("aliases", "variants")[:80]:
         hint_names.append(p.name)
         hint_names.extend(a.text for a in p.aliases.all())
     prompt = (
@@ -126,9 +126,9 @@ CATALOG_FULL_LIMIT = 200  # up to this many products are sent whole; bigger cata
 CATALOG_MATCH_LIMIT = 150
 
 
-def _relevant_products(text, bill, pending):
+def _relevant_products(shop, text, bill, pending):
     """For big catalogs only send the products that the sentence (or the open bill/proposal) could be about."""
-    products = list(Product.objects.prefetch_related("variants", "aliases"))
+    products = list(Product.objects.filter(shop=shop).prefetch_related("variants", "aliases"))
     if len(products) <= CATALOG_FULL_LIMIT:
         return products
     tokens = {t for t in re.findall(r"\w+", (text or "").lower()) if len(t) >= 2}
@@ -149,9 +149,9 @@ def _relevant_products(text, bill, pending):
     return matched[:CATALOG_MATCH_LIMIT] or products[:CATALOG_MATCH_LIMIT]
 
 
-def _catalog_context(text="", bill=None, pending=None):
+def _catalog_context(shop, text="", bill=None, pending=None):
     out = []
-    for p in _relevant_products(text, bill, pending):
+    for p in _relevant_products(shop, text, bill, pending):
         out.append({
             "product_id": p.id,
             "name": p.name,
@@ -185,13 +185,13 @@ def _bill_context(bill):
     ]
 
 
-def interpret(text, bill=None, pending=None):
+def interpret(text, shop, bill=None, pending=None):
     text = (text or "").strip()
     if not text:
         raise VoiceError("Nothing was heard. Please try again.")
     payload = {
         "spoken_text": text,
-        "catalog": _catalog_context(text, bill, pending),
+        "catalog": _catalog_context(shop, text, bill, pending),
         "current_bill": _bill_context(bill),
         "pending_proposal": pending if isinstance(pending, list) else [],
     }
@@ -202,7 +202,7 @@ def interpret(text, bill=None, pending=None):
     actions = raw.get("actions") if isinstance(raw, dict) else None
     if not isinstance(actions, list):
         actions = []
-    return {"transcript": text, "actions": resolve_actions(actions, bill)}
+    return {"transcript": text, "actions": resolve_actions(actions, bill, shop)}
 
 
 # ------------------------------------------------------------------ resolution
@@ -228,11 +228,11 @@ def _int(value):
         return None
 
 
-def _product(pid):
+def _product(pid, shop):
     pid = _int(pid)
     if pid is None:
         return None
-    return Product.objects.prefetch_related("variants").filter(pk=pid).first()
+    return Product.objects.prefetch_related("variants").filter(shop=shop, pk=pid).first()
 
 
 def _variant_of(product, vid):
@@ -246,12 +246,12 @@ def _options(product):
     return [{"id": v.id, "name": v.name, "price": float(v.price)} for v in product.variants.all()]
 
 
-def _resolve_add_items(action):
+def _resolve_add_items(action, shop):
     items = []
     for raw in action.get("items") or []:
         if not isinstance(raw, dict):
             continue
-        product = _product(raw.get("product_id"))
+        product = _product(raw.get("product_id"), shop)
         variant = _variant_of(product, raw.get("variant_id"))
         price = _num(raw.get("price"))
         qty = _num(raw.get("quantity"))
@@ -299,8 +299,8 @@ def _resolve_add_items(action):
     return {"type": "add_items", "items": items} if items else None
 
 
-def _resolve_variant_action(action, price_key):
-    product = _product(action.get("product_id"))
+def _resolve_variant_action(action, price_key, shop):
+    product = _product(action.get("product_id"), shop)
     price = _num(action.get(price_key))
     if product is None or price is None:
         return None
@@ -351,7 +351,7 @@ def _merge_correction(resolved, action):
 _PRICE_CLARIFY = {"type": "clarify", "question": "Kaun si cheez ki price? Dobara bataiye."}
 
 
-def resolve_actions(actions, bill):
+def resolve_actions(actions, bill, shop):
     resolved = []
     for action in actions:
         if not isinstance(action, dict):
@@ -360,7 +360,7 @@ def resolve_actions(actions, bill):
         out = None
 
         if kind == "add_items":
-            out = _resolve_add_items(action)
+            out = _resolve_add_items(action, shop)
 
         elif kind in ("edit_item", "remove_item"):
             item = bill.items.filter(pk=_int(action.get("bill_item_id"))).first() if bill else None
@@ -376,11 +376,11 @@ def resolve_actions(actions, bill):
                         out = None
 
         elif kind == "update_catalog_price":
-            data = _resolve_variant_action(action, "new_price")
+            data = _resolve_variant_action(action, "new_price", shop)
             out = {"type": kind, **data} if data else _PRICE_CLARIFY
 
         elif kind == "price_scope":
-            data = _resolve_variant_action(action, "price")
+            data = _resolve_variant_action(action, "price", shop)
             if data:
                 data["price"] = data.pop("new_price")
                 out = {"type": kind, **data}

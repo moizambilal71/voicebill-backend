@@ -19,7 +19,7 @@ from django.db import close_old_connections
 from django.db.models import Q
 from django.utils import timezone
 
-from .models import Notification, ShopSettings, Variant
+from .models import Notification, Shop, ShopSettings, Variant
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ def sync_variant(variant):
     out = product.track_stock and variant.stock <= 0
     if out and not variant.out_of_stock_notified:
         Notification.objects.create(
+            shop=product.shop,
             kind=Notification.Kind.OUT_OF_STOCK,
             title=f"{label(variant)} is out of stock",
             message="This item is out of stock. Please add stock for it.",
@@ -56,27 +57,37 @@ def sync_variant(variant):
     return False
 
 
-def sync_all():
+def sync_all(shop=None):
+    """Check every category (of one shop, or of all shops when `shop` is None)."""
     created = 0
     # Only categories that might need a change: out of stock now, or flagged from an earlier alert.
     relevant = Q(out_of_stock_notified=True) | Q(product__track_stock=True, stock__lte=0)
-    for v in Variant.objects.select_related("product").filter(relevant):
+    variants = Variant.objects.select_related("product__shop").filter(relevant)
+    if shop is not None:
+        variants = variants.filter(product__shop=shop)
+    for v in variants:
         created += sync_variant(v)
     return created
 
 
-def send_reminder_if_due(now=None):
+def send_reminder_if_due(shop, now=None):
     """One digest notification every `reminder_days` days while items are still out of stock."""
     now = now or timezone.now()
-    names = [label(v) for v in Variant.objects.select_related("product").filter(product__track_stock=True, stock__lte=0)]
+    names = [
+        label(v)
+        for v in Variant.objects.select_related("product").filter(
+            product__shop=shop, product__track_stock=True, stock__lte=0
+        )
+    ]
     if not names:
         return False
-    days = ShopSettings.load().reminder_days
-    latest = Notification.objects.first()  # newest of any kind
+    days = ShopSettings.for_shop(shop).reminder_days
+    latest = Notification.objects.filter(shop=shop).first()  # newest of any kind
     if latest is not None and now - latest.created_at < timedelta(days=days):
         return False
     shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
     n = Notification.objects.create(
+        shop=shop,
         kind=Notification.Kind.REMINDER,
         title=f"Reminder: {len(names)} item{'s' if len(names) != 1 else ''} still out of stock",
         message=f"{shown}. Please update your stock.",
@@ -87,8 +98,8 @@ def send_reminder_if_due(now=None):
 
 def run_checks(now=None):
     created = sync_all()
-    reminded = send_reminder_if_due(now)
-    return {"out_of_stock": created, "reminder": reminded}
+    reminded = sum(send_reminder_if_due(shop, now) for shop in Shop.objects.all())
+    return {"out_of_stock": created, "reminder": bool(reminded)}
 
 
 def _loop(interval):

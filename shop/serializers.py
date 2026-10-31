@@ -6,7 +6,32 @@ from .models import (
 )
 
 
-class AliasSerializer(serializers.ModelSerializer):
+class ShopScopedMixin:
+    """Related ids (variant, customer...) may only point at the signed-in shop's own rows.
+
+    The view passes `context={"shop": shop}`. Without a shop the choices are empty, so a missing context can
+    never leak another shop's data. Set `scoped = {"field": lambda shop: queryset}`.
+    """
+
+    scoped = {}
+
+    def get_fields(self):
+        fields = super().get_fields()
+        shop = self.context.get("shop")
+        for name, make in self.scoped.items():
+            field = fields.get(name)
+            if field is not None and not field.read_only:
+                field.queryset = make(shop) if shop is not None else field.queryset.none()
+        return fields
+
+
+def _variants(shop):
+    return Variant.objects.filter(product__shop=shop)
+
+
+class AliasSerializer(ShopScopedMixin, serializers.ModelSerializer):
+    scoped = {"variant": _variants}
+
     class Meta:
         model = Alias
         fields = ["id", "text", "variant"]
@@ -24,10 +49,11 @@ def clean_codes(codes):
 
 
 def set_barcodes(variant, codes):
-    """Make `codes` the complete list of codes for this category. A code used elsewhere is refused."""
+    """Make `codes` the complete list of codes for this category. A code used elsewhere in the shop is refused."""
     codes = clean_codes(codes)
+    shop_id = variant.product.shop_id
     for c in codes:
-        other = Barcode.objects.filter(code=c).exclude(variant=variant).select_related("variant__product").first()
+        other = Barcode.objects.filter(shop_id=shop_id, code=c).exclude(variant=variant).select_related("variant__product").first()
         if other:
             raise serializers.ValidationError(
                 {"barcodes": f"Code {c} is already linked to {other.variant.product.name} ({other.variant.name})."}
@@ -36,7 +62,7 @@ def set_barcodes(variant, codes):
     have = set(variant.barcodes.values_list("code", flat=True))
     for c in codes:
         if c not in have:
-            Barcode.objects.create(variant=variant, code=c)
+            Barcode.objects.create(shop_id=shop_id, variant=variant, code=c)
 
 
 class VariantSerializer(serializers.ModelSerializer):
@@ -53,7 +79,9 @@ class VariantSerializer(serializers.ModelSerializer):
         return data
 
 
-class BarcodeSerializer(serializers.ModelSerializer):
+class BarcodeSerializer(ShopScopedMixin, serializers.ModelSerializer):
+    scoped = {"variant": _variants}
+
     class Meta:
         model = Barcode
         fields = ["id", "code", "variant"]
@@ -63,7 +91,7 @@ class BarcodeSerializer(serializers.ModelSerializer):
         value = value.strip()
         if not value:
             raise serializers.ValidationError("Code cannot be empty.")
-        other = Barcode.objects.filter(code=value).select_related("variant__product").first()
+        other = Barcode.objects.filter(shop=self.context["shop"], code=value).select_related("variant__product").first()
         if other:
             raise serializers.ValidationError(
                 f"Already linked to {other.variant.product.name} ({other.variant.name})."
@@ -155,7 +183,8 @@ class CustomerSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "phone", "created_at"]
 
 
-class BillItemSerializer(serializers.ModelSerializer):
+class BillItemSerializer(ShopScopedMixin, serializers.ModelSerializer):
+    scoped = {"variant": _variants}
     line_total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     discount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     sold_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
@@ -198,7 +227,8 @@ class BillItemSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class BillSerializer(serializers.ModelSerializer):
+class BillSerializer(ShopScopedMixin, serializers.ModelSerializer):
+    scoped = {"customer": lambda shop: Customer.objects.filter(shop=shop)}
     items = BillItemSerializer(many=True, read_only=True)
     total = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     total_discount = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)

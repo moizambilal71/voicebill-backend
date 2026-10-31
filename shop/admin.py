@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Alias, Bill, BillItem, BillTemplate, Customer, PriceHistory, Product, ShopSettings, Variant
+from .models import Shop, Alias, Bill, BillItem, BillTemplate, Customer, PriceHistory, Product, ShopSettings, Variant
 
 
 class VariantInline(admin.TabularInline):
@@ -42,3 +42,10 @@ admin.site.register(Customer)
 admin.site.register(PriceHistory)
 admin.site.register(ShopSettings)
 admin.site.register(BillTemplate)
+
+
+@admin.register(Shop)
+class ShopAdmin(admin.ModelAdmin):
+    list_display = ["__str__", "owner", "plan", "bills_generated", "created_at"]
+    list_filter = ["plan"]
+    search_fields = ["name", "owner__email"]

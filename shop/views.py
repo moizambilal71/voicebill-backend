@@ -1,19 +1,22 @@
 import datetime
 from decimal import Decimal, InvalidOperation
 
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from django.db.models import F, Q
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import mixins, status, viewsets
-from rest_framework.decorators import action, api_view, parser_classes
+from rest_framework.exceptions import APIException
+from rest_framework.decorators import action, api_view, parser_classes, permission_classes
+from rest_framework.permissions import AllowAny
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
 from . import voice as voice_service
 
 from . import importer, monitor
-from .models import Alias, Barcode, Bill, BillItem, BillTemplate, Customer, Notification, PriceHistory, Product, ShopSettings, Variant
+from .models import Alias, Barcode, Bill, BillItem, BillTemplate, Customer, Notification, PriceHistory, Product, Shop, ShopSettings, Variant
 from .serializers import (
     AliasSerializer,
     BarcodeSerializer,
@@ -30,7 +33,46 @@ from .serializers import (
 )
 
 
+class PlanLimitReached(APIException):
+    """402: the free plan's bills are used up. The app shows the upgrade dialog on this `code`."""
+
+    status_code = 402
+    default_code = "plan_limit"
+
+    def __init__(self, shop):
+        super().__init__()
+        # Plain values (not ErrorDetail strings) so the app gets real numbers.
+        self.detail = {
+            "detail": f"You have used all {shop.bill_limit} free bills. Upgrade your plan to keep making bills.",
+            "code": "plan_limit",
+            "plan": shop.plan,
+            "limit": shop.bill_limit,
+            "used": shop.bills_generated,
+        }
+
+
+class ShopScoped:
+    """Mixin for viewsets: only the signed-in user's shop is visible, and new rows go to that shop.
+
+    Subclasses set `shop_filter` (the ORM path to the shop, e.g. "product__shop"). A row of another shop is
+    simply "not found" (404), so ids from other shops reveal nothing.
+    """
+
+    shop_filter = "shop"
+
+    @property
+    def shop(self):
+        return self.request.user.shop
+
+    def get_queryset(self):
+        return super().get_queryset().filter(**{self.shop_filter: self.shop})
+
+    def get_serializer_context(self):
+        return {**super().get_serializer_context(), "shop": self.shop}
+
+
 @api_view(["GET"])
+@permission_classes([AllowAny])
 def health(request):
     return Response({"status": "ok", "service": "voicebill-backend"})
 
@@ -38,20 +80,24 @@ def health(request):
 @api_view(["GET"])
 def summary(request):
     """Numbers for the home page cards. "Today" follows the shop's timezone."""
+    shop = request.user.shop
     today = timezone.localdate()
-    sold = Bill.objects.filter(status=Bill.Status.CONFIRMED, confirmed_at__date=today).prefetch_related("items")
+    sold = Bill.objects.filter(shop=shop, status=Bill.Status.CONFIRMED, confirmed_at__date=today).prefetch_related("items")
     return Response(
         {
             "today_sales": sum((b.total for b in sold), Decimal("0")),
-            "bills_today": Bill.objects.filter(created_at__date=today).exclude(status=Bill.Status.CANCELLED).count(),
-            "out_of_stock": Variant.objects.filter(product__track_stock=True, stock__lte=0).count(),
+            "bills_today": Bill.objects.filter(shop=shop, created_at__date=today).exclude(status=Bill.Status.CANCELLED).count(),
+            "out_of_stock": Variant.objects.filter(product__shop=shop, product__track_stock=True, stock__lte=0).count(),
         }
     )
 
 
-class ProductViewSet(viewsets.ModelViewSet):
+class ProductViewSet(ShopScoped, viewsets.ModelViewSet):
     queryset = Product.objects.prefetch_related("variants__barcodes", "aliases")
     serializer_class = ProductSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(shop=self.shop)
 
     def list(self, request, *args, **kwargs):
         """Plain list by default. With ?q=, ?limit= or ?offset= it searches (name, category, spoken name,
@@ -75,7 +121,7 @@ class ProductViewSet(viewsets.ModelViewSet):
             return Response({"detail": "limit and offset must be numbers."}, status=400)
         count = qs.count()
         page = qs.order_by("name", "id")[offset : offset + limit]
-        return Response({"count": count, "results": ProductSerializer(page, many=True).data})
+        return Response({"count": count, "results": ProductSerializer(page, many=True, context=self.get_serializer_context()).data})
 
     @action(detail=False, methods=["post"], url_path="import", parser_classes=[MultiPartParser])
     def import_file(self, request):
@@ -88,12 +134,12 @@ class ProductViewSet(viewsets.ModelViewSet):
         except importer.ImportFileError as exc:
             return Response({"detail": str(exc)}, status=400)
         dry = str(request.data.get("dry_run", "")).lower() in ("1", "true", "yes")
-        return Response(importer.run(rows, apply=not dry))
+        return Response(importer.run(rows, self.shop, apply=not dry))
 
     @action(detail=True, methods=["post"])
     def add_variant(self, request, pk=None):
         product = self.get_object()
-        serializer = VariantSerializer(data=request.data)
+        serializer = VariantSerializer(data=request.data, context=self.get_serializer_context())
         serializer.is_valid(raise_exception=True)
         data = dict(serializer.validated_data)
         data.pop("id", None)
@@ -106,7 +152,7 @@ class ProductViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def add_alias(self, request, pk=None):
         product = self.get_object()
-        serializer = AliasSerializer(data=request.data)
+        serializer = AliasSerializer(data=request.data, context=self.get_serializer_context())
         serializer.is_valid(raise_exception=True)
         variant = serializer.validated_data.get("variant")
         if variant and variant.product_id != product.id:
@@ -115,7 +161,8 @@ class ProductViewSet(viewsets.ModelViewSet):
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
-class VariantViewSet(viewsets.ReadOnlyModelViewSet):
+class VariantViewSet(ShopScoped, viewsets.ReadOnlyModelViewSet):
+    shop_filter = "product__shop"
     queryset = Variant.objects.select_related("product")
     serializer_class = VariantSerializer
 
@@ -162,14 +209,23 @@ class VariantViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(PriceHistorySerializer(variant.price_history.all(), many=True).data)
 
 
-class CustomerViewSet(viewsets.ModelViewSet):
+class CustomerViewSet(ShopScoped, viewsets.ModelViewSet):
     queryset = Customer.objects.all()
     serializer_class = CustomerSerializer
 
+    def perform_create(self, serializer):
+        serializer.save(shop=self.shop)
 
-class BillViewSet(viewsets.ModelViewSet):
+
+class BillViewSet(ShopScoped, viewsets.ModelViewSet):
     queryset = Bill.objects.prefetch_related("items", "items__variant")
     serializer_class = BillSerializer
+
+    def perform_create(self, serializer):
+        shop = self.shop
+        if shop.at_limit:
+            raise PlanLimitReached(shop)
+        serializer.save(shop=shop)
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -202,11 +258,11 @@ class BillViewSet(viewsets.ModelViewSet):
             return Response({"detail": "limit and offset must be numbers."}, status=400)
         qs = self.get_queryset()
         page = qs[offset : offset + limit]
-        return Response({"count": qs.count(), "results": BillSerializer(page, many=True).data})
+        return Response({"count": qs.count(), "results": BillSerializer(page, many=True, context=self.get_serializer_context()).data})
 
     def _fresh(self, bill):
         """Re-read the bill so the response reflects the latest items."""
-        return Response(BillSerializer(self.get_queryset().get(pk=bill.pk)).data)
+        return Response(BillSerializer(self.get_queryset().get(pk=bill.pk), context=self.get_serializer_context()).data)
 
     def _editable(self, bill):
         if bill.status != Bill.Status.DRAFT:
@@ -238,7 +294,7 @@ class BillViewSet(viewsets.ModelViewSet):
         bill = self.get_object()
         if (err := self._editable(bill)) is not None:
             return err
-        serializer = BillItemSerializer(data=request.data)
+        serializer = BillItemSerializer(data=request.data, context=self.get_serializer_context())
         serializer.is_valid(raise_exception=True)
         variant = serializer.validated_data.get("variant")
         if not self._wants_ignore_stock(request) and variant is not None:
@@ -260,7 +316,7 @@ class BillViewSet(viewsets.ModelViewSet):
         code = str(request.data.get("code") or "").strip()
         if not code:
             return Response({"detail": "Nothing was scanned."}, status=400)
-        barcode = Barcode.objects.select_related("variant__product").filter(code=code).first()
+        barcode = Barcode.objects.select_related("variant__product").filter(shop=self.shop, code=code).first()
         if barcode is None:
             return Response(
                 {"detail": "This code is not in your catalog yet.", "code": "unknown_barcode", "barcode": code}, status=404
@@ -295,7 +351,7 @@ class BillViewSet(viewsets.ModelViewSet):
             line.quantity = line.quantity + qty
             line.save(update_fields=["quantity"])
         else:
-            serializer = BillItemSerializer(data={"variant": variant.id, "quantity": qty})
+            serializer = BillItemSerializer(data={"variant": variant.id, "quantity": qty}, context=self.get_serializer_context())
             serializer.is_valid(raise_exception=True)
             line = serializer.save(bill=bill)
         fresh = self._fresh(bill).data
@@ -316,7 +372,7 @@ class BillViewSet(viewsets.ModelViewSet):
         if item.price_source == BillItem.PriceSource.SPOKEN:
             data["sold_price"] = item.sold_price
         data.update(request.data)
-        serializer = BillItemSerializer(item, data=data)
+        serializer = BillItemSerializer(item, data=data, context=self.get_serializer_context())
         serializer.is_valid(raise_exception=True)
         variant = serializer.validated_data.get("variant")
         if not self._wants_ignore_stock(request) and variant is not None:
@@ -345,6 +401,11 @@ class BillViewSet(viewsets.ModelViewSet):
 
         ignore = self._wants_ignore_stock(request)
         with transaction.atomic():
+            # Plan limit: the first confirmation of a bill uses one of the shop's bills; re-confirming an edited
+            # bill is free. The shop row is locked so two devices cannot both take the last free bill.
+            shop = Shop.objects.select_for_update().get(pk=bill.shop_id)
+            if not bill.counted_toward_plan and shop.at_limit:
+                raise PlanLimitReached(shop)
             if not ignore:
                 totals = {}
                 for item in bill.items.select_related("variant__product"):
@@ -365,10 +426,13 @@ class BillViewSet(viewsets.ModelViewSet):
             touched = {i.variant for i in bill.items.select_related("variant__product") if i.variant}
             bill.status = Bill.Status.CONFIRMED
             bill.confirmed_at = timezone.now()
-            bill.save(update_fields=["status", "confirmed_at"])
+            if not bill.counted_toward_plan:
+                bill.counted_toward_plan = True
+                Shop.objects.filter(pk=shop.pk).update(bills_generated=F("bills_generated") + 1)
+            bill.save(update_fields=["status", "confirmed_at", "counted_toward_plan"])
         for variant in touched:
             monitor.sync_variant(variant)  # raises the "out of stock" notification right away
-        return Response(BillSerializer(bill).data)
+        return Response(BillSerializer(bill, context=self.get_serializer_context()).data)
 
     @staticmethod
     def _restore_stock(bill):
@@ -407,7 +471,7 @@ class BillViewSet(viewsets.ModelViewSet):
             return err
         bill.status = Bill.Status.CANCELLED
         bill.save(update_fields=["status"])
-        return Response(BillSerializer(bill).data)
+        return Response(BillSerializer(bill, context=self.get_serializer_context()).data)
 
 
 MAX_AUDIO_BYTES = 10 * 1024 * 1024
@@ -434,7 +498,7 @@ def voice_transcribe(request):
     if audio.size < 1000:
         return Response({"detail": "Recording was empty. Hold the mic a little longer."}, status=400)
     try:
-        text = voice_service.transcribe(audio.name or "speech.webm", audio.read(), audio.content_type)
+        text = voice_service.transcribe(request.user.shop, audio.name or "speech.webm", audio.read(), audio.content_type)
     except Exception as exc:  # noqa: BLE001 - surface any provider error as a clean message
         return _voice_error(exc)
     return Response({"text": text})
@@ -446,9 +510,9 @@ def voice_interpret(request):
     text = request.data.get("text", "")
     bill = None
     if request.data.get("bill_id"):
-        bill = Bill.objects.prefetch_related("items").filter(pk=request.data["bill_id"]).first()
+        bill = Bill.objects.prefetch_related("items").filter(shop=request.user.shop, pk=request.data["bill_id"]).first()
     try:
-        return Response(voice_service.interpret(text, bill, request.data.get("pending")))
+        return Response(voice_service.interpret(text, request.user.shop, bill, request.data.get("pending")))
     except Exception as exc:  # noqa: BLE001
         return _voice_error(exc)
 
@@ -456,7 +520,7 @@ def voice_interpret(request):
 @api_view(["GET", "PUT", "PATCH"])
 def shop_settings(request):
     """Bill language + shop details (one record for the whole shop)."""
-    obj = ShopSettings.load()
+    obj = ShopSettings.for_shop(request.user.shop)
     if request.method == "GET":
         return Response(ShopSettingsSerializer(obj).data)
     serializer = ShopSettingsSerializer(obj, data=request.data, partial=request.method == "PATCH")
@@ -465,19 +529,19 @@ def shop_settings(request):
     return Response(serializer.data)
 
 
-class BillTemplateViewSet(viewsets.ModelViewSet):
+class BillTemplateViewSet(ShopScoped, viewsets.ModelViewSet):
     """Built-in default + templates the shopkeeper adds. Exactly one is selected."""
 
     queryset = BillTemplate.objects.all()
     serializer_class = BillTemplateSerializer
 
     def list(self, request, *args, **kwargs):
-        BillTemplate.ensure_default()
+        BillTemplate.ensure_default(self.shop)
         return super().list(request, *args, **kwargs)
 
     def perform_create(self, serializer):
-        BillTemplate.ensure_default()
-        serializer.save(is_default=False, is_selected=False)
+        BillTemplate.ensure_default(self.shop)
+        serializer.save(shop=self.shop, is_default=False, is_selected=False)
 
     def update(self, request, *args, **kwargs):
         if self.get_object().is_default:
@@ -491,28 +555,29 @@ class BillTemplateViewSet(viewsets.ModelViewSet):
         if template.is_default:
             return Response({"detail": "The default template cannot be deleted."}, status=400)
         template.delete()
-        BillTemplate.ensure_default()  # if the deleted one was selected, fall back to default
+        BillTemplate.ensure_default(self.shop)  # if the deleted one was selected, fall back to default
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"])
     def select(self, request, pk=None):
         template = self.get_object()
         template.select()
-        return Response(BillTemplateSerializer(template).data)
+        return Response(BillTemplateSerializer(template, context=self.get_serializer_context()).data)
 
 
-class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
+class NotificationViewSet(ShopScoped, viewsets.ReadOnlyModelViewSet):
     """The bell icon. `list` returns {"unread": n, "items": [...]} (latest 50)."""
 
     queryset = Notification.objects.all()
     serializer_class = NotificationSerializer
 
     def list(self, request, *args, **kwargs):
-        monitor.sync_all()  # stock may have been edited by hand; keep the bell truthful
-        items = Notification.objects.all()[:50]
+        monitor.sync_all(self.shop)  # stock may have been edited by hand; keep the bell truthful
+        mine = self.get_queryset()
+        items = mine[:50]
         return Response(
             {
-                "unread": Notification.objects.filter(read_at__isnull=True).count(),
+                "unread": mine.filter(read_at__isnull=True).count(),
                 "items": NotificationSerializer(items, many=True).data,
             }
         )
@@ -527,15 +592,18 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=["post"])
     def read_all(self, request):
-        Notification.objects.filter(read_at__isnull=True).update(read_at=timezone.now())
+        self.get_queryset().filter(read_at__isnull=True).update(read_at=timezone.now())
         return Response({"unread": 0})
 
 
-class BarcodeViewSet(mixins.CreateModelMixin, mixins.DestroyModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet):
+class BarcodeViewSet(ShopScoped, mixins.CreateModelMixin, mixins.DestroyModelMixin, mixins.ListModelMixin, viewsets.GenericViewSet):
     """Codes linked to categories. `lookup/?code=` tells whether a scanned code is already known."""
 
     queryset = Barcode.objects.select_related("variant__product")
     serializer_class = BarcodeSerializer
+
+    def perform_create(self, serializer):
+        serializer.save(shop=self.shop)
 
     @action(detail=False, methods=["get"])
     def lookup(self, request):

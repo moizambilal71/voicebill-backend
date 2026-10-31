@@ -1,8 +1,8 @@
 from decimal import Decimal
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
-from shop.models import Alias, Product, Variant
+from shop.models import Alias, Product, Shop, Variant, create_starter_data
 
 DEMO = [
     # (name, unit, track_stock, [(variant, price, stock)], [(alias, variant_name|None)])
@@ -18,12 +18,18 @@ DEMO = [
 
 
 class Command(BaseCommand):
-    help = "Load demo products (safe to run more than once)."
+    help = "Load demo products into a shop (safe to run more than once)."
+
+    def add_arguments(self, parser):
+        parser.add_argument("--email", required=True, help="Email of the account that owns the shop.")
 
     def handle(self, *args, **options):
+        shop = Shop.objects.filter(owner__email__iexact=options["email"]).first()
+        if shop is None:
+            raise CommandError("No account with that email. Sign up first.")
         for name, unit, track, variants, aliases in DEMO:
             product, _ = Product.objects.get_or_create(
-                name=name, defaults={"unit": unit, "track_stock": track}
+                shop=shop, name=name, defaults={"unit": unit, "track_stock": track}
             )
             for vname, price, stock in variants:
                 Variant.objects.get_or_create(
@@ -33,4 +39,4 @@ class Command(BaseCommand):
             for text, vname in aliases:
                 variant = product.variants.get(name=vname) if vname else None
                 Alias.objects.get_or_create(product=product, variant=variant, text=text)
-        self.stdout.write(self.style.SUCCESS(f"Demo data ready: {Product.objects.count()} products."))
+        self.stdout.write(self.style.SUCCESS(f"Demo data ready: {Product.objects.filter(shop=shop).count()} products."))

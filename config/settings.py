@@ -29,6 +29,9 @@ SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "dev-insecure-change-me")
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DJANGO_DEBUG", "True") == "True"
 
+if not DEBUG and SECRET_KEY in ("dev-insecure-change-me", "change-me", ""):
+    raise RuntimeError("Set a long random DJANGO_SECRET_KEY before running with DJANGO_DEBUG=False.")
+
 ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
 
 
@@ -43,6 +46,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "corsheaders",
+    "accounts",
     "shop",
 ]
 
@@ -135,6 +139,9 @@ CORS_ALLOWED_ORIGINS = os.getenv(
 
 REST_FRAMEWORK = {
     "COERCE_DECIMAL_TO_STRING": False,
+    # Everything needs a signed-in user unless a view says otherwise (health, sign-in, sign-up).
+    "DEFAULT_AUTHENTICATION_CLASSES": ["accounts.authentication.SessionAuth"],
+    "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated", "accounts.permissions.HasShop"],
 }
 
 # Voice (OpenAI). The key lives only in .env, never in git.
@@ -143,3 +150,67 @@ OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcrib
 OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4.1-mini")
 VOICE_LANGUAGE = os.getenv("VOICE_LANGUAGE", "ur")  # empty = auto-detect
 DATA_UPLOAD_MAX_MEMORY_SIZE = 12 * 1024 * 1024
+
+
+# ---------------------------------------------------------------- Plans
+# Bills a shop on the Free plan may generate (confirm). The 11th needs the Pro plan.
+FREE_BILL_LIMIT = int(os.getenv("FREE_BILL_LIMIT", "10"))
+
+
+# ---------------------------------------------------------------- Accounts and security
+def _env_list(name, default=""):
+    return [x.strip() for x in os.getenv(name, default).split(",") if x.strip()]
+
+
+# Sign-in uses a session cookie the browser cannot read (HttpOnly) plus CSRF protection. Turn SECURE on as soon
+# as the site is served over https (DJANGO_SECURE_COOKIES=1); the ngrok https address needs it off only because
+# Django itself still sees plain http behind the proxy.
+SECURE_COOKIES = os.getenv("DJANGO_SECURE_COOKIES", "0") == "1"
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SECURE = SECURE_COOKIES
+SESSION_COOKIE_AGE = 60 * 60 * 24 * 14  # signed in for 14 days
+CSRF_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SECURE = SECURE_COOKIES
+# The browser talks to the site address (Next forwards /api to Django), so that address must be trusted for CSRF.
+CSRF_TRUSTED_ORIGINS = _env_list(
+    "CSRF_TRUSTED_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000,https://*.ngrok-free.app,https://*.ngrok-free.dev,https://*.ngrok.app,https://*.ngrok.io",
+)
+CORS_ALLOW_CREDENTIALS = True
+
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "same-origin"
+X_FRAME_OPTIONS = "DENY"
+SECURE_HSTS_SECONDS = int(os.getenv("DJANGO_HSTS_SECONDS", "0"))  # e.g. 31536000 once https works everywhere
+SECURE_HSTS_INCLUDE_SUBDOMAINS = SECURE_HSTS_SECONDS > 0
+
+# How many reverse proxies sit in front of Django (Next's /api forwarder counts as one; ngrok / a load balancer
+# adds another). Used to find the visitor's real address for rate limits.
+TRUSTED_PROXY_COUNT = int(os.getenv("TRUSTED_PROXY_COUNT", "1"))
+
+# Emailed verification codes.
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")  # prints in the terminal
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "1") == "1"
+EMAIL_FILE_PATH = os.getenv("EMAIL_FILE_PATH", str(BASE_DIR / "sent_emails"))  # for the file-based backend
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "VoiceBill <no-reply@voicebill.local>")
+EMAIL_CODE_TTL_SECONDS = 10 * 60
+EMAIL_CODE_MAX_ATTEMPTS = 5
+EMAIL_CODE_RESEND_SECONDS = 45
+TRUSTED_DEVICE_DAYS = 30
+
+# "Continue with Google": the OAuth client id from Google Cloud Console (the same value the frontend uses).
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+
+# Who may take over the shop data that existed before accounts were added: only this email, or the first person to
+# sign up when this is empty. (A fresh database has no such data, so this only matters for an upgraded install.)
+LEGACY_SHOP_OWNER_EMAIL = os.getenv("LEGACY_SHOP_OWNER_EMAIL", "").strip().lower()
+
+# Payments are not connected yet. Leave DEMO_UPGRADE off in real use: with it on, the Upgrade button switches the
+# plan to Pro for free (handy to try the screens). Change plans for real with `manage.py set_plan` or the admin.
+DEMO_UPGRADE = os.getenv("DEMO_UPGRADE", "0") == "1"
+PRO_PRICE_LABEL = os.getenv("PRO_PRICE_LABEL", "Price coming soon")

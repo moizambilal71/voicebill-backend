@@ -28,6 +28,22 @@ API: http://127.0.0.1:8000/api/  ·  Admin: http://127.0.0.1:8000/admin/
 
 Run the tests (no OpenAI needed): `python manage.py test`
 
+## Accounts, sign-in and plans
+
+- Every shop has its own account. Sign up with email + password (a 6-digit code is emailed to prove the address) or
+  with **Continue with Google**. Signing in from a new browser asks for a code again; "remember this device" skips it
+  for 30 days. Passwords are hashed, codes are stored hashed, expire in 10 minutes and die after 5 wrong tries.
+- All data (products, bills, barcodes, templates, alerts, settings) belongs to one shop; an account can never see
+  another shop's rows. Anonymous requests get **401** (only `/api/health/` and the sign-in endpoints are open).
+- Sessions use an HttpOnly cookie + CSRF token. Sign-in endpoints are rate-limited per address and per email.
+- **Free plan: 10 bills** (`FREE_BILL_LIMIT`). The 11th bill answers **402** `{"code":"plan_limit"}`. Deleting or
+  cancelling a bill never gives a free bill back. Pro is unlimited. Payment is not connected yet: change a plan with
+  `python manage.py set_plan name@example.com pro` (or in `/admin/`).
+- Data that existed before accounts were added goes to the first account that signs up (Pro, grandfathered).
+- Local testing without a mail server: the code is printed in the terminal running `runserver`.
+- Google: create a Web OAuth client in Google Cloud Console, add your site address under "Authorised JavaScript
+  origins", and put the client id in `GOOGLE_CLIENT_ID` (backend) and `NEXT_PUBLIC_GOOGLE_CLIENT_ID` (frontend).
+
 ## After every `git pull`
 
 ```bash
@@ -98,7 +114,13 @@ app sends the current proposal back as `pending` so a spoken answer or correctio
 
 | Method | Path | What it does |
 |---|---|---|
-| GET | `/api/health/` | Health check |
+| GET | `/api/health/` | Health check (open) |
+| GET | `/api/auth/csrf/` | Gives the browser its CSRF cookie |
+| POST | `/api/auth/signup/` · `/verify/` · `/resend/` | Create account, enter the emailed code, resend it |
+| POST | `/api/auth/login/` · `/google/` · `/logout/` | Sign in (new device asks for a code) / Google / sign out |
+| POST | `/api/auth/password/forgot/` · `/password/reset/` | Reset a password with an emailed code |
+| GET | `/api/auth/me/` | The signed-in user and shop (401 when signed out) |
+| GET | `/api/auth/subscription/` | Plan, bills used / left, plan list |
 | GET/PUT/PATCH | `/api/settings/` | Bill language and shop details |
 | GET/POST | `/api/templates/` | List / add bill templates |
 | PATCH/DELETE | `/api/templates/{id}/` | Edit / delete a custom template |

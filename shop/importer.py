@@ -110,11 +110,11 @@ def _split_codes(text):
     return [c.strip() for c in re.split(r"[;|,\n]+", text) if c.strip()]
 
 
-def run(rows, apply=False):
+def run(rows, shop, apply=False):
     """Check every row (and write the good ones when apply=True). Returns the summary dict."""
-    products = {p.name.lower(): p for p in Product.objects.all()}
-    variants = {(v.product_id, v.name.lower()): v for v in Variant.objects.all()}
-    owners = {c: vid for c, vid in Barcode.objects.values_list("code", "variant_id")}  # code -> variant id
+    products = {p.name.lower(): p for p in Product.objects.filter(shop=shop)}
+    variants = {(v.product_id, v.name.lower()): v for v in Variant.objects.filter(product__shop=shop)}
+    owners = {c: vid for c, vid in Barcode.objects.filter(shop=shop).values_list("code", "variant_id")}  # code -> variant id
 
     new_products, new_variants, updated, errors = set(), 0, 0, []
     planned = {}  # (product name lower, category lower) -> row number, to spot duplicates inside the file
@@ -159,7 +159,7 @@ def run(rows, apply=False):
                 if c in planned_codes and planned_codes[c] != key:
                     clash = f"Code {c} is also used by another row in this file."
                 elif c in owners and (variant is None or owners[c] != variant.id):
-                    other = Barcode.objects.select_related("variant__product").get(code=c)
+                    other = Barcode.objects.select_related("variant__product").get(shop=shop, code=c)
                     clash = f"Code {c} already belongs to {other.variant.product.name} ({other.variant.name})."
                 if clash:
                     break
@@ -183,7 +183,7 @@ def run(rows, apply=False):
             if apply:
                 if product is None:
                     product = Product.objects.create(
-                        name=name, unit=unit,
+                        shop=shop, name=name, unit=unit,
                         track_stock=track_stock if track_stock is not None else stock is not None,
                     )
                     products[name.lower()] = product
@@ -202,7 +202,7 @@ def run(rows, apply=False):
                     variant.save()
                 for c in codes:
                     if c not in owners:
-                        Barcode.objects.create(variant=variant, code=c)
+                        Barcode.objects.create(shop=shop, variant=variant, code=c)
                         owners[c] = variant.id
 
     return {

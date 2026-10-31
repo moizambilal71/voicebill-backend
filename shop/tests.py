@@ -3,23 +3,22 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase
-from rest_framework.test import APIClient
 
 from .models import Alias, Bill, BillItem, Notification, Product, Variant
+from .testutils import ShopTestCase
 
 
-class VoiceInterpretTests(TestCase):
+class VoiceInterpretTests(ShopTestCase):
     def setUp(self):
-        self.client = APIClient()
-        self.sugar = Product.objects.create(name="Sugar", unit="kg")
+        self.client = self.make_client()
+        self.sugar = Product.objects.create(shop=self.shop, name="Sugar", unit="kg")
         self.sugar_v = Variant.objects.create(product=self.sugar, name="Standard", price=150)
         Alias.objects.create(product=self.sugar, text="cheeni")
-        self.daliya = Product.objects.create(name="Daliya", unit="kg")
+        self.daliya = Product.objects.create(shop=self.shop, name="Daliya", unit="kg")
         self.d100 = Variant.objects.create(product=self.daliya, name="Regular", price=100)
         self.d150 = Variant.objects.create(product=self.daliya, name="Medium", price=150)
         self.d200 = Variant.objects.create(product=self.daliya, name="Premium", price=200)
-        self.bill = Bill.objects.create(customer_name="Ali")
+        self.bill = Bill.objects.create(shop=self.shop, customer_name="Ali")
 
     def interpret(self, actions, text="x"):
         with patch("shop.voice._chat_json", return_value={"actions": actions}):
@@ -105,7 +104,7 @@ class VoiceInterpretTests(TestCase):
 
     def test_edit_and_remove_only_this_bills_items(self):
         item = BillItem.objects.create(bill=self.bill, item_name="Sugar", quantity=1, sold_price=150)
-        other = Bill.objects.create()
+        other = Bill.objects.create(shop=self.shop)
         foreign = BillItem.objects.create(bill=other, item_name="X", quantity=1, sold_price=1)
         actions = self.interpret([
             {"type": "edit_item", "bill_item_id": item.id, "price": 140},
@@ -137,9 +136,9 @@ class VoiceInterpretTests(TestCase):
         self.assertEqual(res.status_code, 400)
 
 
-class VoiceTranscribeTests(TestCase):
+class VoiceTranscribeTests(ShopTestCase):
     def setUp(self):
-        self.client = APIClient()
+        self.client = self.make_client()
 
     def test_requires_audio(self):
         self.assertEqual(self.client.post("/api/voice/transcribe/", {}, format="multipart").status_code, 400)
@@ -162,9 +161,9 @@ class VoiceTranscribeTests(TestCase):
         self.assertIn("OPENAI_API_KEY", res.json()["detail"])
 
 
-class SettingsAndTemplateTests(TestCase):
+class SettingsAndTemplateTests(ShopTestCase):
     def setUp(self):
-        self.client = APIClient()
+        self.client = self.make_client()
 
     def templates(self):
         return self.client.get("/api/templates/").json()
@@ -248,14 +247,14 @@ class SettingsAndTemplateTests(TestCase):
         self.assertFalse(res.json()["show_discount"])
 
 
-class VoiceFollowUpTests(TestCase):
+class VoiceFollowUpTests(ShopTestCase):
     """Quantity is never assumed, prices are per piece, later corrections win."""
 
     def setUp(self):
-        self.client = APIClient()
-        self.sugar = Product.objects.create(name="Sugar", unit="kg")
+        self.client = self.make_client()
+        self.sugar = Product.objects.create(shop=self.shop, name="Sugar", unit="kg")
         Variant.objects.create(product=self.sugar, name="Standard", price=150)
-        self.bill = Bill.objects.create()
+        self.bill = Bill.objects.create(shop=self.shop)
 
     def run_llm(self, actions, text="x", pending=None):
         captured = {}
@@ -326,9 +325,9 @@ class VoiceFollowUpTests(TestCase):
         self.assertEqual(a["items"][0]["missing"], [])
 
 
-class ProductEditDeleteTests(TestCase):
+class ProductEditDeleteTests(ShopTestCase):
     def setUp(self):
-        self.client = APIClient()
+        self.client = self.make_client()
         res = self.client.post("/api/products/", {
             "name": "Daliya", "unit": "kg", "track_stock": False,
             "variants": [{"name": "Regular", "price": 100, "stock": 0}, {"name": "Premium", "price": 200, "stock": 0}],
@@ -360,7 +359,7 @@ class ProductEditDeleteTests(TestCase):
         self.assertFalse(Variant.objects.filter(pk=self.premium["id"]).exists())
 
     def test_cannot_touch_another_products_variant(self):
-        other = Product.objects.create(name="Other", unit="kg")
+        other = Product.objects.create(shop=self.shop, name="Other", unit="kg")
         ov = Variant.objects.create(product=other, name="X", price=1)
         res = self.put(variants=[{"id": ov.id, "name": "X", "price": 5, "stock": 0}])
         self.assertEqual(res.status_code, 400)
@@ -376,7 +375,7 @@ class ProductEditDeleteTests(TestCase):
         self.assertEqual(self.put(variants=[]).status_code, 400)
 
     def test_delete_product_keeps_old_bill_lines(self):
-        bill = Bill.objects.create()
+        bill = Bill.objects.create(shop=self.shop)
         BillItem.objects.create(bill=bill, variant_id=self.regular["id"], item_name="Daliya (Regular)", quantity=2, sold_price=100)
         self.assertEqual(self.client.delete(f"/api/products/{self.product['id']}/").status_code, 204)
         self.assertFalse(Product.objects.filter(pk=self.product["id"]).exists())
@@ -385,12 +384,12 @@ class ProductEditDeleteTests(TestCase):
         self.assertEqual((item.item_name, item.sold_price, item.variant_id), ("Daliya (Regular)", 100, None))
 
 
-class BillFilterTests(TestCase):
+class BillFilterTests(ShopTestCase):
     def setUp(self):
-        self.client = APIClient()
-        self.a = Bill.objects.create(customer_name="Bilal Ahmed")
-        self.b = Bill.objects.create(customer_name="Ali")
-        self.c = Bill.objects.create(customer_name="bilal khan")
+        self.client = self.make_client()
+        self.a = Bill.objects.create(shop=self.shop, customer_name="Bilal Ahmed")
+        self.b = Bill.objects.create(shop=self.shop, customer_name="Ali")
+        self.c = Bill.objects.create(shop=self.shop, customer_name="bilal khan")
         from django.utils import timezone
         import datetime as dt
         Bill.objects.filter(pk=self.c.pk).update(created_at=timezone.now() - dt.timedelta(days=3))
@@ -417,12 +416,12 @@ class BillFilterTests(TestCase):
         self.assertEqual(len(self.ids("?date=nope")), 3)
 
 
-class ReopenDeleteBillTests(TestCase):
+class ReopenDeleteBillTests(ShopTestCase):
     def setUp(self):
-        self.client = APIClient()
-        self.product = Product.objects.create(name="Pen", unit="piece", track_stock=True)
+        self.client = self.make_client()
+        self.product = Product.objects.create(shop=self.shop, name="Pen", unit="piece", track_stock=True)
         self.v = Variant.objects.create(product=self.product, name="Standard", price=10, stock=100)
-        self.bill = Bill.objects.create()
+        self.bill = Bill.objects.create(shop=self.shop)
         BillItem.objects.create(bill=self.bill, variant=self.v, item_name="Pen", quantity=4, list_price=10, sold_price=10)
         self.client.post(f"/api/bills/{self.bill.id}/confirm/")
 
@@ -450,18 +449,18 @@ class ReopenDeleteBillTests(TestCase):
         self.assertFalse(Bill.objects.filter(pk=self.bill.id).exists())
 
     def test_delete_draft_bill_leaves_stock(self):
-        draft = Bill.objects.create()
+        draft = Bill.objects.create(shop=self.shop)
         BillItem.objects.create(bill=draft, variant=self.v, item_name="Pen", quantity=1, sold_price=10)
         self.assertEqual(self.client.delete(f"/api/bills/{draft.id}/").status_code, 204)
         self.assertEqual(self.stock(), 96)
 
 
-class StockLimitTests(TestCase):
+class StockLimitTests(ShopTestCase):
     def setUp(self):
-        self.client = APIClient()
-        self.p = Product.objects.create(name="Sugar", unit="kg", track_stock=True)
+        self.client = self.make_client()
+        self.p = Product.objects.create(shop=self.shop, name="Sugar", unit="kg", track_stock=True)
         self.v = Variant.objects.create(product=self.p, name="Standard", price=150, stock=5)
-        self.bill = Bill.objects.create()
+        self.bill = Bill.objects.create(shop=self.shop)
 
     def add(self, qty, **extra):
         return self.client.post(f"/api/bills/{self.bill.id}/add_item/", {"variant": self.v.id, "quantity": qty, **extra}, format="json")
@@ -515,12 +514,12 @@ class StockLimitTests(TestCase):
         self.assertEqual(self.add(500).status_code, 201)
 
 
-class NotificationTests(TestCase):
+class NotificationTests(ShopTestCase):
     def setUp(self):
         from django.utils import timezone
         self.now = timezone.now()
-        self.client = APIClient()
-        self.p = Product.objects.create(name="Sugar", unit="kg", track_stock=True)
+        self.client = self.make_client()
+        self.p = Product.objects.create(shop=self.shop, name="Sugar", unit="kg", track_stock=True)
         self.v = Variant.objects.create(product=self.p, name="Standard", price=150, stock=2)
 
     def feed(self):
@@ -529,7 +528,7 @@ class NotificationTests(TestCase):
         return res.json()
 
     def sell_all(self):
-        bill = Bill.objects.create()
+        bill = Bill.objects.create(shop=self.shop)
         BillItem.objects.create(bill=bill, variant=self.v, item_name="Sugar", quantity=2, sold_price=150)
         self.assertEqual(self.client.post(f"/api/bills/{bill.id}/confirm/").status_code, 200)
         return bill
@@ -604,12 +603,12 @@ class NotificationTests(TestCase):
         self.assertEqual(self.feed()["unread"], 0)
 
 
-class BarcodeTests(TestCase):
+class BarcodeTests(ShopTestCase):
     def setUp(self):
-        self.client = APIClient()
-        self.p = Product.objects.create(name="Lux Soap", unit="piece", track_stock=True)
+        self.client = self.make_client()
+        self.p = Product.objects.create(shop=self.shop, name="Lux Soap", unit="piece", track_stock=True)
         self.v = Variant.objects.create(product=self.p, name="Standard", price=80, stock=10)
-        self.bill = Bill.objects.create()
+        self.bill = Bill.objects.create(shop=self.shop)
 
     def link(self, code="8901234567890", variant=None):
         return self.client.post("/api/barcodes/", {"variant": (variant or self.v).id, "code": code}, format="json")
@@ -623,7 +622,7 @@ class BarcodeTests(TestCase):
         self.assertTrue(res["found"])
         self.assertEqual((res["product_name"], float(res["price"])), ("Lux Soap", 80.0))
         self.assertFalse(self.client.get("/api/barcodes/lookup/?code=nope").json()["found"])
-        other = Variant.objects.create(product=Product.objects.create(name="Other"), name="Standard", price=1)
+        other = Variant.objects.create(product=Product.objects.create(shop=self.shop, name="Other"), name="Standard", price=1)
         dup = self.link(variant=other)
         self.assertEqual(dup.status_code, 400)
         self.assertIn("Lux Soap", str(dup.json()))
@@ -698,7 +697,7 @@ class BarcodeTests(TestCase):
 
     def test_product_search_and_paging(self):
         for i in range(120):
-            p = Product.objects.create(name=f"Item {i:03d}")
+            p = Product.objects.create(shop=self.shop, name=f"Item {i:03d}")
             Variant.objects.create(product=p, name="Standard", price=1)
         res = self.client.get("/api/products/?limit=50&offset=100").json()
         self.assertEqual(res["count"], 121)
@@ -711,9 +710,9 @@ class BarcodeTests(TestCase):
         self.assertIsInstance(self.client.get("/api/products/").json(), list)  # old behaviour unchanged
 
 
-class ImportTests(TestCase):
+class ImportTests(ShopTestCase):
     def setUp(self):
-        self.client = APIClient()
+        self.client = self.make_client()
 
     def post(self, text, dry=False, name="p.csv"):
         from django.core.files.uploadedfile import SimpleUploadedFile
@@ -789,24 +788,24 @@ class ImportTests(TestCase):
         self.assertEqual(Variant.objects.get(product__name="Biscuit").barcodes.get().code, "8901234567890")
 
 
-class VoiceCatalogScaleTests(TestCase):
+class VoiceCatalogScaleTests(ShopTestCase):
     def test_big_catalog_is_narrowed_to_matching_products(self):
         from shop import voice
         for i in range(400):
-            p = Product.objects.create(name=f"Thing{i}")
+            p = Product.objects.create(shop=self.shop, name=f"Thing{i}")
             Variant.objects.create(product=p, name="Standard", price=1)
-        target = Product.objects.create(name="Sugar")
+        target = Product.objects.create(shop=self.shop, name="Sugar")
         Variant.objects.create(product=target, name="Standard", price=150)
-        ctx = voice._catalog_context("aadha kilo sugar do", None, None)
+        ctx = voice._catalog_context(self.shop, "aadha kilo sugar do", None, None)
         names = [c["name"] for c in ctx]
         self.assertIn("Sugar", names)
         self.assertLess(len(names), 20)
 
 
-class AddStockTests(TestCase):
+class AddStockTests(ShopTestCase):
     def setUp(self):
-        self.client = APIClient()
-        self.p = Product.objects.create(name="Rio", unit="piece", track_stock=False)
+        self.client = self.make_client()
+        self.p = Product.objects.create(shop=self.shop, name="Rio", unit="piece", track_stock=False)
         self.v = Variant.objects.create(product=self.p, name="Strawberry", price=30, stock=0)
 
     def add(self, qty):
@@ -837,36 +836,36 @@ class AddStockTests(TestCase):
         self.assertFalse(self.v.out_of_stock_notified)
 
 
-class SummaryTests(TestCase):
+class SummaryTests(ShopTestCase):
     def test_numbers_for_the_home_cards(self):
-        client = APIClient()
-        p = Product.objects.create(name="Pen", unit="piece", track_stock=True)
+        client = self.make_client()
+        p = Product.objects.create(shop=self.shop, name="Pen", unit="piece", track_stock=True)
         v = Variant.objects.create(product=p, name="Standard", price=20, stock=5)
-        Variant.objects.create(product=Product.objects.create(name="Gone", track_stock=True), name="Standard", price=1, stock=0)
-        sold = Bill.objects.create()
+        Variant.objects.create(product=Product.objects.create(shop=self.shop, name="Gone", track_stock=True), name="Standard", price=1, stock=0)
+        sold = Bill.objects.create(shop=self.shop)
         client.post(f"/api/bills/{sold.id}/add_item/", {"variant": v.id, "quantity": 2}, format="json")
         client.post(f"/api/bills/{sold.id}/confirm/")
-        Bill.objects.create()  # a draft today
+        Bill.objects.create(shop=self.shop)  # a draft today
         res = client.get("/api/summary/").json()
         self.assertEqual(float(res["today_sales"]), 40.0)
         self.assertEqual(res["bills_today"], 2)
         self.assertEqual(res["out_of_stock"], 1)
 
 
-class DarkModeSettingTests(TestCase):
+class DarkModeSettingTests(ShopTestCase):
     def test_dark_by_default_and_saved_for_the_whole_shop(self):
-        client = APIClient()
+        client = self.make_client()
         self.assertTrue(client.get("/api/settings/").json()["dark_mode"])
         self.assertEqual(client.patch("/api/settings/", {"dark_mode": False}, format="json").status_code, 200)
-        self.assertFalse(APIClient().get("/api/settings/").json()["dark_mode"])  # another device sees it
+        self.assertFalse(self.make_client().get("/api/settings/").json()["dark_mode"])  # another device sees it
         client.patch("/api/settings/", {"shop_name": "Ali"}, format="json")  # other edits keep it
         self.assertFalse(client.get("/api/settings/").json()["dark_mode"])
 
 
-class BillPagingTests(TestCase):
+class BillPagingTests(ShopTestCase):
     def test_limit_and_offset_page_newest_first(self):
-        client = APIClient()
-        ids = [Bill.objects.create(customer_name=f"c{i}").id for i in range(12)]
+        client = self.make_client()
+        ids = [Bill.objects.create(shop=self.shop, customer_name=f"c{i}").id for i in range(12)]
         first = client.get("/api/bills/?limit=5").json()
         self.assertEqual(first["count"], 12)
         self.assertEqual([b["id"] for b in first["results"]], ids[::-1][:5])

@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import models, transaction
 
 
@@ -13,6 +14,45 @@ class Unit(models.TextChoices):
     PACK = "pack", "Pack"
 
 
+class Shop(models.Model):
+    """One shopkeeper's business. All catalog, bill and settings data belongs to exactly one shop.
+
+    `owner` is empty only for data that existed before accounts were added; the first person who signs up
+    takes it over (see accounts.services.claim_or_create_shop).
+    """
+
+    class Plan(models.TextChoices):
+        FREE = "free", "Free"
+        PRO = "pro", "Pro"
+
+    owner = models.OneToOneField(
+        settings.AUTH_USER_MODEL, related_name="shop", on_delete=models.CASCADE, null=True, blank=True
+    )
+    name = models.CharField(max_length=200, blank=True)
+    plan = models.CharField(max_length=10, choices=Plan.choices, default=Plan.FREE)
+    # Bills ever confirmed. Never goes down (deleting or re-opening a bill does not give the free bill back).
+    bills_generated = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return self.name or f"Shop {self.pk}"
+
+    @property
+    def bill_limit(self):
+        """Bills allowed on this plan; None means unlimited."""
+        return settings.FREE_BILL_LIMIT if self.plan == self.Plan.FREE else None
+
+    @property
+    def at_limit(self):
+        limit = self.bill_limit
+        return limit is not None and self.bills_generated >= limit
+
+    @property
+    def bills_left(self):
+        limit = self.bill_limit
+        return None if limit is None else max(limit - self.bills_generated, 0)
+
+
 class Product(models.Model):
     """A catalog item, e.g. 'Daliya' or 'Washing wear'.
 
@@ -20,6 +60,7 @@ class Product(models.Model):
     gets a single variant named 'Standard'.
     """
 
+    shop = models.ForeignKey(Shop, related_name="products", on_delete=models.CASCADE)
     name = models.CharField(max_length=200)
     unit = models.CharField(max_length=10, choices=Unit.choices, default=Unit.PIECE)
     track_stock = models.BooleanField(default=False)
@@ -57,9 +98,14 @@ class Barcode(models.Model):
     A code belongs to exactly one category (variant); one category can have several codes.
     """
 
-    code = models.CharField(max_length=128, unique=True)
+    shop = models.ForeignKey(Shop, related_name="barcodes", on_delete=models.CASCADE)
+    code = models.CharField(max_length=128)
     variant = models.ForeignKey(Variant, related_name="barcodes", on_delete=models.CASCADE)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # The same code may exist in two different shops, never twice in one.
+        constraints = [models.UniqueConstraint(fields=["shop", "code"], name="unique_code_per_shop")]
 
     def __str__(self):
         return self.code
@@ -98,6 +144,7 @@ class PriceHistory(models.Model):
 
 
 class Customer(models.Model):
+    shop = models.ForeignKey(Shop, related_name="customers", on_delete=models.CASCADE)
     name = models.CharField(max_length=200)
     phone = models.CharField(max_length=20, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -112,6 +159,7 @@ class Bill(models.Model):
         CONFIRMED = "confirmed", "Confirmed"
         CANCELLED = "cancelled", "Cancelled"
 
+    shop = models.ForeignKey(Shop, related_name="bills", on_delete=models.CASCADE)
     customer = models.ForeignKey(
         Customer, related_name="bills", on_delete=models.SET_NULL, null=True, blank=True
     )
@@ -119,6 +167,8 @@ class Bill(models.Model):
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT)
     created_at = models.DateTimeField(auto_now_add=True)
     confirmed_at = models.DateTimeField(null=True, blank=True)
+    # True once this bill has used one of the shop's plan bills (re-confirming after an edit costs nothing).
+    counted_toward_plan = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["-created_at"]
@@ -178,7 +228,7 @@ class BillItem(models.Model):
 
 
 class ShopSettings(models.Model):
-    """One row for the whole shop: bill language and shop details printed on bills."""
+    """One row per shop: bill language and shop details printed on bills."""
 
     class Language(models.TextChoices):
         ENGLISH = "en", "English"
@@ -186,6 +236,7 @@ class ShopSettings(models.Model):
         ROMAN = "roman", "Roman Urdu"
         BOTH = "both", "Urdu + English"
 
+    shop = models.OneToOneField(Shop, related_name="settings", on_delete=models.CASCADE)
     language = models.CharField(max_length=10, choices=Language.choices, default=Language.ENGLISH)
     shop_name = models.CharField(max_length=200, blank=True)
     shop_address = models.CharField(max_length=300, blank=True)
@@ -199,8 +250,8 @@ class ShopSettings(models.Model):
         verbose_name_plural = "shop settings"
 
     @classmethod
-    def load(cls):
-        obj, _ = cls.objects.get_or_create(pk=1)
+    def for_shop(cls, shop):
+        obj, _ = cls.objects.get_or_create(shop=shop)
         return obj
 
     def __str__(self):
@@ -234,6 +285,7 @@ class BillTemplate(models.Model):
         MEDIUM = "medium", "Medium"
         LARGE = "large", "Large"
 
+    shop = models.ForeignKey(Shop, related_name="templates", on_delete=models.CASCADE)
     name = models.CharField(max_length=80)
     is_default = models.BooleanField(default=False)
     is_selected = models.BooleanField(default=False)
@@ -256,18 +308,19 @@ class BillTemplate(models.Model):
         return self.name
 
     @classmethod
-    def ensure_default(cls):
-        default = cls.objects.filter(is_default=True).first()
+    def ensure_default(cls, shop):
+        mine = cls.objects.filter(shop=shop)
+        default = mine.filter(is_default=True).first()
         if default is None:
-            default = cls.objects.create(name="Default receipt", is_default=True)
-        if not cls.objects.filter(is_selected=True).exists():
+            default = cls.objects.create(shop=shop, name="Default receipt", is_default=True)
+        if not mine.filter(is_selected=True).exists():
             default.is_selected = True
             default.save(update_fields=["is_selected"])
         return default
 
     def select(self):
         with transaction.atomic():
-            BillTemplate.objects.exclude(pk=self.pk).update(is_selected=False)
+            BillTemplate.objects.filter(shop=self.shop).exclude(pk=self.pk).update(is_selected=False)
             self.is_selected = True
             self.save(update_fields=["is_selected"])
 
@@ -279,6 +332,7 @@ class Notification(models.Model):
         OUT_OF_STOCK = "out_of_stock", "Out of stock"
         REMINDER = "reminder", "Stock reminder"
 
+    shop = models.ForeignKey(Shop, related_name="notifications", on_delete=models.CASCADE)
     kind = models.CharField(max_length=20, choices=Kind.choices)
     title = models.CharField(max_length=200)
     message = models.CharField(max_length=500, blank=True)
@@ -293,3 +347,24 @@ class Notification(models.Model):
 
     def __str__(self):
         return self.title
+
+
+# The ready-made designs every new shop starts with (normal templates the shopkeeper can edit or delete).
+STARTER_TEMPLATES = [
+    ("Modern coral (A4)", "modern", "a4"),
+    ("Boutique emerald (A4)", "boutique", "a4"),
+    ("Royal navy & gold (A4)", "royal", "a4"),
+    ("Sunset glow (A4)", "sunset", "a4"),
+    ("Noir luxe (A4)", "noir", "a4"),
+    ("Ticket pro (80 mm)", "ticket", "80mm"),
+]
+
+
+def create_starter_data(shop):
+    """Settings, the default receipt and the ready-made designs for a brand-new shop."""
+    ShopSettings.for_shop(shop)
+    BillTemplate.ensure_default(shop)
+    for name, layout, paper in STARTER_TEMPLATES:
+        BillTemplate.objects.get_or_create(
+            shop=shop, name=name, defaults={"layout": layout, "paper_size": paper, "font_size": "medium"}
+        )
