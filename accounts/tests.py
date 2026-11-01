@@ -468,3 +468,59 @@ class BrevoBackendTests(TestCase):
                 patch("accounts.brevo.requests.post", return_value=bad):
             with self.assertRaises(RuntimeError):
                 send_mail("S", "B", "a@example.com", ["b@example.com"])
+
+
+class EmailLinkTests(AuthBase):
+    def req(self, **meta):
+        from django.test import RequestFactory
+        return RequestFactory().post("/x", **meta)
+
+    def test_localhost_while_testing_and_the_domain_once_deployed(self):
+        from . import emailing
+        with self.settings(DEBUG=True, FRONTEND_URL="http://localhost:3000"):
+            self.assertEqual(emailing.frontend_url(self.req(HTTP_ORIGIN="http://localhost:3000")), "http://localhost:3000")
+            self.assertEqual(emailing.frontend_url(None), "http://localhost:3000")
+        with self.settings(DEBUG=False, FRONTEND_URL="https://app.example.com", ALLOWED_HOSTS=["app.example.com"], CSRF_TRUSTED_ORIGINS=[]):
+            self.assertEqual(emailing.frontend_url(self.req(HTTP_ORIGIN="https://app.example.com")), "https://app.example.com")
+            # localhost is not trusted in production, and unknown sites never are
+            self.assertEqual(emailing.frontend_url(self.req(HTTP_ORIGIN="http://localhost:3000")), "https://app.example.com")
+            self.assertEqual(emailing.frontend_url(self.req(HTTP_ORIGIN="https://evil.example.net")), "https://app.example.com")
+
+    def test_tunnel_address_is_used_when_trusted(self):
+        from . import emailing
+        with self.settings(DEBUG=True):
+            self.assertEqual(emailing.frontend_url(self.req(HTTP_ORIGIN="https://abc-123.ngrok-free.app")), "https://abc-123.ngrok-free.app")
+
+    def test_referer_is_used_when_there_is_no_origin(self):
+        from . import emailing
+        with self.settings(DEBUG=True):
+            self.assertEqual(emailing.frontend_url(self.req(HTTP_REFERER="http://127.0.0.1:3000/plans")), "http://127.0.0.1:3000")
+
+    def test_approval_email_buttons_open_the_site_the_customer_used(self):
+        from . import payments
+        from .models import PaymentMethod
+        self.sign_up_and_verify()
+        shop = Shop.objects.get(owner__username="a@example.com")
+        p = PaymentRequest.objects.create(shop=shop, user=shop.owner, method=PaymentMethod.objects.get(key="paypal"), site_url="https://app.example.com")
+        mail.outbox.clear()
+        payments.review(p, True)
+        html = mail.outbox[-1].alternatives[0][0]
+        self.assertIn('href="https://app.example.com/"', html)
+        self.assertIn("Open Dashboard", html)
+        self.assertIn("Create Your First Bill", html)
+        self.assertIn("https://app.example.com/?new=1", html)
+
+    def test_payment_request_remembers_the_site(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        self.sign_up_and_verify()
+        f = SimpleUploadedFile("a.png", png(), content_type="image/png")
+        with self.settings(DEBUG=True):
+            self.c.post("/api/auth/payments/", {"method": "jazzcash", "screenshots": [f]}, format="multipart",
+                        HTTP_X_CSRFTOKEN=self.c.cookies["csrftoken"].value, HTTP_ORIGIN="http://localhost:3000")
+        self.assertEqual(PaymentRequest.objects.get().site_url, "http://localhost:3000")
+
+    def test_code_email_has_a_designed_html_part(self):
+        self.signup()
+        html = mail.outbox[-1].alternatives[0][0]
+        self.assertIn("Your verification code", html)
+        self.assertIn(last_code(), html)

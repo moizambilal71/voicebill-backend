@@ -16,7 +16,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from . import payments, ratelimit, services
+from . import emailing, payments, ratelimit, services
 from .authentication import CsrfAlways, SessionAuth
 from .models import EmailCode, PaymentMethod, PaymentProof, PaymentRequest, TrustedDevice
 
@@ -168,15 +168,29 @@ def signup(request):
     try:
         if existing is not None and existing.is_active:
             # Do not reveal that the address already has an account. The real owner gets an email saying so.
-            from django.core.mail import send_mail
+            from django.core.mail import EmailMultiAlternatives
 
-            send_mail(
+            site = emailing.frontend_url(request)
+            note = EmailMultiAlternatives(
                 "Someone tried to create a VoiceBill account with your email",
-                "This email already has a VoiceBill account. If it was you, just sign in (or use 'Forgot password').\n"
+                f"This email already has a VoiceBill account. If it was you, just sign in: {site}/login (or use 'Forgot password').\n"
                 "If it was not you, you can ignore this message.",
                 settings.DEFAULT_FROM_EMAIL,
                 [email],
             )
+            note.attach_alternative(
+                emailing.layout(
+                    "You already have an account",
+                    "Someone (hopefully you) tried to create a VoiceBill account with this email, but it already has one. "
+                    "Just sign in, or reset your password if you forgot it.",
+                    "",
+                    emailing.button(f"{site}/login", "Sign in") + emailing.button(f"{site}/forgot", "Forgot password", outline=True),
+                    "If this was not you, you can ignore this message. Your account is safe.",
+                    emoji="👋",
+                ),
+                "text/html",
+            )
+            note.send()
             return Response({"verification_required": True, "purpose": "signup", "email": email, "resend_in": settings.EMAIL_CODE_RESEND_SECONDS})
         with transaction.atomic():
             if existing is None:
@@ -497,7 +511,7 @@ def submit_payment(request):
     with transaction.atomic():
         payment = PaymentRequest.objects.create(
             shop=shop, user=user, method=method, amount_label=settings.PRO_PRICE_LABEL,
-            payer_account=payer, transaction_id=txn,
+            payer_account=payer, transaction_id=txn, site_url=emailing.frontend_url(request),
         )
         for f, mime in files:
             PaymentProof.objects.create(request=payment, file=f, content_type=mime, size=f.size)

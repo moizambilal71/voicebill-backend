@@ -107,6 +107,8 @@ class PaymentRequest(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="payment_requests", on_delete=models.CASCADE)
     method = models.ForeignKey(PaymentMethod, on_delete=models.PROTECT)
     amount_label = models.CharField(max_length=60, blank=True)  # the price shown when they paid
+    # The website address the customer used (localhost or your domain), so the emails we send them open the same site.
+    site_url = models.CharField(max_length=200, blank=True)
     payer_account = models.CharField(max_length=100, blank=True)
     transaction_id = models.CharField(max_length=64, blank=True)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)

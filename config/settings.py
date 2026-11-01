@@ -216,6 +216,10 @@ LEGACY_SHOP_OWNER_EMAIL = os.getenv("LEGACY_SHOP_OWNER_EMAIL", "").strip().lower
 # CHANGE THIS to your real price (shown in the Upgrade window and in emails).
 PRO_PRICE_LABEL = os.getenv("PRO_PRICE_LABEL", "Rs 1,999 / month")
 
+# The website address email buttons open. While testing this is your local site; when deployed, set your domain
+# (e.g. https://app.example.com). If the visitor used a trusted address, that one is used automatically instead.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+
 # Where "someone paid" emails go (default: the Brevo sender address), and the WhatsApp number (digits only, with
 # country code, e.g. 923001234567) that rejected customers are sent to.
 ADMIN_NOTIFY_EMAIL = os.getenv("ADMIN_NOTIFY_EMAIL", "").strip()

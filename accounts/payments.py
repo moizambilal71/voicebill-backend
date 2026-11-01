@@ -10,6 +10,7 @@ from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
 from django.utils import timezone
 
+from . import emailing
 from .models import PaymentMethod, PaymentProof, PaymentRequest
 
 log = logging.getLogger(__name__)
@@ -62,22 +63,6 @@ def admin_url(payment):
     return f"{settings.ADMIN_BASE_URL}/admin/accounts/paymentrequest/{payment.pk}/change/"
 
 
-def _button(url, label, color="#14876a"):
-    return (
-        f'<a href="{html.escape(url)}" style="display:inline-block;background:{color};color:#fff;text-decoration:none;'
-        f'padding:12px 22px;border-radius:10px;font-weight:600;font-family:Arial,sans-serif">{html.escape(label)}</a>'
-    )
-
-
-def _table(rows):
-    cells = "".join(
-        f'<tr><td style="padding:6px 14px 6px 0;color:#666">{html.escape(k)}</td>'
-        f'<td style="padding:6px 0"><b>{html.escape(str(v) or "-")}</b></td></tr>'
-        for k, v in rows
-    )
-    return f'<table style="font-family:Arial,sans-serif;font-size:14px">{cells}</table>'
-
-
 def notify_admin(payment):
     """Email the admin: who paid, how, the transaction details, the screenshots attached, and a button to the record."""
     rows = [
@@ -93,12 +78,14 @@ def notify_admin(payment):
     ]
     url = admin_url(payment)
     text = "New Pro payment request\n\n" + "\n".join(f"{k}: {v or '-'}" for k, v in rows) + f"\n\nView payment details: {url}\n"
-    body = (
-        '<div style="font-family:Arial,sans-serif;max-width:560px">'
-        '<h2 style="margin:0 0 4px">New Pro payment request</h2>'
-        '<p style="color:#666;margin:0 0 16px">Check that the money arrived, then approve or reject it.</p>'
-        f"{_table(rows)}<p style=\"margin:22px 0\">{_button(url, 'View payment details')}</p>"
-        '<p style="color:#888;font-size:12px">The screenshots are attached. You need to be signed in to the admin to open the button.</p></div>'
+    body = emailing.layout(
+        "New Pro payment request",
+        "Check that the money arrived in your account, then approve or reject it.",
+        emailing.details_table(rows),
+        emailing.button(url, "View payment details"),
+        "The screenshots are attached. You need to be signed in to the admin for the button to open.",
+        preheader=f"{payment.user.email} paid with {payment.method.name}",
+        emoji="💳",
     )
     msg = EmailMultiAlternatives(
         f"Payment request #{payment.pk} · {payment.method.name} · {payment.user.email}", text, None, [admin_email()],
@@ -128,13 +115,22 @@ def whatsapp_link(payment):
 def notify_customer(payment):
     """Tell the customer (on their sign-in email, never the payment account) what happened."""
     name = payment.user.first_name or "there"
+    site = (payment.site_url or settings.FRONTEND_URL).rstrip("/")
     if payment.status == PaymentRequest.Status.APPROVED:
         subject = "Your VoiceBill Pro plan is active"
-        text = f"Hi {name},\n\nThank you! We received your payment and your VoiceBill Pro plan is now active. You can make unlimited bills.\n\nOpen the app and keep selling.\n"
-        body = (
-            f'<div style="font-family:Arial,sans-serif;max-width:520px"><h2>Your Pro plan is active 🎉</h2>'
-            f"<p>Hi {html.escape(name)},</p><p>Thank you! We received your payment and your VoiceBill <b>Pro</b> plan is now active. "
-            "You can make unlimited bills.</p></div>"
+        text = (
+            f"Hi {name},\n\nThank you! We received your payment and your VoiceBill Pro plan is now active. "
+            f"You can make unlimited bills.\n\nOpen your dashboard: {site}/\nCreate your first bill: {site}/?new=1\n"
+        )
+        body = emailing.layout(
+            "Your Pro plan is active!",
+            f"Hi {html.escape(name)},<br>Thank you! We received your payment and your VoiceBill <b>Pro</b> plan is now active. "
+            "You can make <b>unlimited bills</b> from today.",
+            emailing.details_table([("Plan", "Pro"), ("Paid with", payment.method.name), ("Bills", "Unlimited")]),
+            emailing.button(f"{site}/", "Open Dashboard") + emailing.button(f"{site}/?new=1", "Create Your First Bill", outline=True),
+            "Need help? Just reply to this email.",
+            preheader="Payment received. Unlimited bills are ready.",
+            emoji="🎉",
         )
     else:
         link = whatsapp_link(payment)
@@ -143,13 +139,20 @@ def notify_customer(payment):
         text = (
             f"Hi {name},\n\nWe could not find your payment for request #{payment.pk}, so your plan was not upgraded.{note}\n\n"
             + (f"To talk to us on WhatsApp (your payment details are filled in for you):\n{link}\n" if link else "Please reply to this email so we can sort it out.\n")
+            + f"\nYou can also try again: {site}/plans\n"
         )
-        body = (
-            f'<div style="font-family:Arial,sans-serif;max-width:520px"><h2>We could not confirm your payment</h2>'
-            f"<p>Hi {html.escape(name)},</p><p>We could not find your payment for request <b>#{payment.pk}</b>, so your plan was not upgraded.</p>"
-            + (f"<p><i>{html.escape(payment.admin_note)}</i></p>" if payment.admin_note else "")
-            + ("<p>Please contact us so we can sort it out:</p><p>" + _button(link, "Chat with us on WhatsApp", "#25D366") + "</p>" if link else "<p>Please reply to this email so we can sort it out.</p>")
-            + "</div>"
+        buttons = (emailing.button(link, "Chat with us on WhatsApp", "#1fa855") if link else "") + emailing.button(f"{site}/plans", "Try again", outline=True)
+        body = emailing.layout(
+            "We could not confirm your payment",
+            f"Hi {html.escape(name)},<br>We could not find your payment for request <b>#{payment.pk}</b>, so your plan was not upgraded."
+            + (f'<br><br><i style="color:#6b7280">“{html.escape(payment.admin_note)}”</i>' if payment.admin_note else "")
+            + "<br><br>Please contact us and we will sort it out quickly."
+            + ("" if link else " Just reply to this email."),
+            emailing.details_table([("Request", f"#{payment.pk}"), ("Payment method", payment.method.name), ("Transaction ID", payment.transaction_id or "-")]),
+            buttons,
+            "Your account and bills are safe. Nothing was deleted.",
+            preheader="We could not find your payment yet.",
+            emoji="⚠️",
         )
     msg = EmailMultiAlternatives(subject, text, None, [payment.user.email], reply_to=[admin_email()])
     msg.attach_alternative(body, "text/html")

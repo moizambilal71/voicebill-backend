@@ -6,12 +6,13 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.core.mail import send_mail
+from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
 from django.utils import timezone
 
 from shop.models import Shop, create_starter_data
 
+from . import emailing
 from .models import EmailCode, Profile, TrustedDevice
 
 log = logging.getLogger(__name__)
@@ -68,8 +69,19 @@ def send_code(email, purpose, user=None):
         "Never share this code with anyone. VoiceBill staff will never ask for it.\n"
         "If you did not ask for it, you can ignore this email; your account is safe."
     )
+    page = emailing.layout(
+        "Your verification code",
+        f"Use this code to {reason}. It works once and expires in <b>{minutes} minutes</b>.",
+        emailing.code_box(code),
+        "",
+        "Never share this code with anyone. VoiceBill staff will never ask for it.<br>If you did not ask for it, ignore this email; your account is safe.",
+        preheader=f"{code} is your VoiceBill code",
+        emoji="🔐",
+    )
     try:
-        send_mail(f"{code} is your VoiceBill code", body, settings.DEFAULT_FROM_EMAIL, [email], fail_silently=False)
+        msg = EmailMultiAlternatives(f"{code} is your VoiceBill code", body, settings.DEFAULT_FROM_EMAIL, [email])
+        msg.attach_alternative(page, "text/html")
+        msg.send(fail_silently=False)
     except Exception as exc:  # noqa: BLE001 - SMTP errors vary
         log.exception("Could not send the verification email")
         raise EmailSendError("We could not send the email right now. Please try again in a minute.") from exc
