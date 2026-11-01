@@ -212,7 +212,20 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 # sign up when this is empty. (A fresh database has no such data, so this only matters for an upgraded install.)
 LEGACY_SHOP_OWNER_EMAIL = os.getenv("LEGACY_SHOP_OWNER_EMAIL", "").strip().lower()
 
-# Payments are not connected yet. Leave DEMO_UPGRADE off in real use: with it on, the Upgrade button switches the
-# plan to Pro for free (handy to try the screens). Change plans for real with `manage.py set_plan` or the admin.
-DEMO_UPGRADE = os.getenv("DEMO_UPGRADE", "0") == "1"
-PRO_PRICE_LABEL = os.getenv("PRO_PRICE_LABEL", "Price coming soon")
+# Pro is paid by hand: the customer sends money, uploads screenshots, and an admin approves it in /admin/.
+# CHANGE THIS to your real price (shown in the Upgrade window and in emails).
+PRO_PRICE_LABEL = os.getenv("PRO_PRICE_LABEL", "Rs 1,999 / month")
+
+# Where "someone paid" emails go (default: the Brevo sender address), and the WhatsApp number (digits only, with
+# country code, e.g. 923001234567) that rejected customers are sent to.
+ADMIN_NOTIFY_EMAIL = os.getenv("ADMIN_NOTIFY_EMAIL", "").strip()
+ADMIN_WHATSAPP_NUMBER = "".join(ch for ch in os.getenv("ADMIN_WHATSAPP_NUMBER", "") if ch.isdigit())
+# Address of the Django admin as YOU open it (used for the "View payment details" button in the email).
+ADMIN_BASE_URL = os.getenv("ADMIN_BASE_URL", "http://localhost:8000").rstrip("/")
+
+# Payment screenshots are stored here and only ever served to the owner and to staff (never a public URL).
+MEDIA_ROOT = BASE_DIR / "media"
+MAX_PROOF_FILES = 6
+MAX_PROOF_BYTES = 3 * 1024 * 1024
+DATA_UPLOAD_MAX_MEMORY_SIZE = 25 * 1024 * 1024
+

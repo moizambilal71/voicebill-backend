@@ -11,7 +11,7 @@ from rest_framework.test import APIClient
 
 from shop.models import Bill, Product, Shop
 
-from .models import EmailCode
+from .models import EmailCode, PaymentRequest
 
 User = get_user_model()
 PW = "Str0ng-pass-123"
@@ -259,19 +259,176 @@ class LegacyShopTests(AuthBase):
 
 
 class SubscriptionTests(AuthBase):
-    def test_free_plan_info_and_payment_not_connected(self):
+    def test_free_plan_info(self):
         self.sign_up_and_verify()
         info = self.c.get("/api/auth/subscription/").json()
         self.assertEqual((info["plan"], info["bill_limit"], info["bills_left"]), ("free", 10, 10))
         self.assertEqual([p["id"] for p in info["plans"]], ["free", "pro"])
-        res = self.post("/api/auth/subscription/upgrade/")
-        self.assertEqual((res.status_code, res.json()["code"]), (501, "payment_not_connected"))
-        self.assertEqual(Shop.objects.get(owner__username="a@example.com").plan, "free")  # cannot self-upgrade
+        self.assertIsNone(info["payment"])
+        self.assertEqual(self.c.post("/api/auth/subscription/upgrade/", {}, format="json", HTTP_X_CSRFTOKEN=self.token).status_code, 404)  # no self-upgrade
 
-    @override_settings(DEMO_UPGRADE=True)
-    def test_demo_upgrade_switches_to_pro(self):
+
+def png(size=200):
+    return b"\x89PNG\r\n\x1a\n" + b"0" * size
+
+
+class PaymentTests(AuthBase):
+    def setUp(self):
+        super().setUp()
         self.sign_up_and_verify()
-        self.assertEqual(self.post("/api/auth/subscription/upgrade/").json()["plan"], "pro")
+        self.shop = Shop.objects.get(owner__username="a@example.com")
+        mail.outbox.clear()
+
+    def pay(self, files=None, **data):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        body = {"method": "jazzcash", **data}
+        if files is None:
+            files = [SimpleUploadedFile("a.png", png(), content_type="image/png")]
+        body["screenshots"] = files
+        token = self.c.cookies["csrftoken"].value
+        return self.c.post("/api/auth/payments/", body, format="multipart", HTTP_X_CSRFTOKEN=token)
+
+    def test_methods_are_grouped_and_seeded(self):
+        res = self.c.get("/api/auth/payment-methods/").json()
+        names = {m["name"] for m in res["methods"]}
+        self.assertEqual(names, {"JazzCash", "EasyPaisa", "Neopay", "SadaPay", "UBL Bank", "HBL Bank", "Payoneer", "PayPal", "Wise"})
+        self.assertEqual({m["group"] for m in res["methods"]}, {"local", "international"})
+        self.assertEqual({m["name"]: m["payer_field"] for m in res["methods"]}["PayPal"], "email")
+
+    def test_submit_creates_request_and_emails_admin_with_screenshots(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        files = [SimpleUploadedFile(f"{i}.png", png(), content_type="image/png") for i in range(2)]
+        with self.settings(ADMIN_NOTIFY_EMAIL="boss@example.com"):
+            res = self.pay(files, payer_account="0300 1234567", transaction_id="TX-99")
+        self.assertEqual(res.status_code, 201, res.content)
+        p = PaymentRequest.objects.get()
+        self.assertEqual((p.status, p.transaction_id, p.payer_account, p.proofs.count()), ("pending", "TX-99", "0300 1234567", 2))
+        m = mail.outbox[-1]
+        self.assertEqual(m.to, ["boss@example.com"])
+        self.assertEqual(len(m.attachments), 2)
+        html = m.alternatives[0][0]
+        self.assertIn(f"/admin/accounts/paymentrequest/{p.pk}/change/", html)
+        self.assertIn("TX-99", m.body)
+        self.assertIn("a@example.com", m.body)
+        info = self.c.get("/api/auth/subscription/").json()
+        self.assertEqual(info["payment"]["status"], "pending")
+        self.assertEqual(info["plan"], "free")  # nothing changes until an admin approves
+
+    def test_at_least_one_screenshot_is_required(self):
+        self.assertEqual(self.pay([]).json()["code"], "bad_proof")
+
+    def test_only_real_images_and_sane_sizes(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        fake = SimpleUploadedFile("a.png", b"<html>not an image</html>", content_type="image/png")
+        self.assertEqual(self.pay([fake]).status_code, 400)
+        big = SimpleUploadedFile("b.png", png(4 * 1024 * 1024), content_type="image/png")
+        self.assertIn("too big", self.pay([big]).json()["detail"])
+        many = [SimpleUploadedFile(f"{i}.png", png(), content_type="image/png") for i in range(7)]
+        self.assertEqual(self.pay(many).status_code, 400)
+        self.assertEqual(PaymentRequest.objects.count(), 0)
+
+    def test_bad_method_and_bad_details(self):
+        self.assertEqual(self.pay(method="bitcoin").status_code, 400)
+        self.assertEqual(self.pay(method="paypal", payer_account="not-an-email").status_code, 400)
+        self.assertEqual(self.pay(payer_account="abc").status_code, 400)
+        self.assertEqual(self.pay(transaction_id="<script>").status_code, 400)
+
+    def test_only_one_pending_request_at_a_time(self):
+        self.assertEqual(self.pay().status_code, 201)
+        res = self.pay()
+        self.assertEqual((res.status_code, res.json()["code"]), (409, "payment_pending"))
+
+    def test_request_is_kept_even_if_the_admin_email_fails(self):
+        with patch("accounts.payments.notify_admin", side_effect=RuntimeError("smtp down")):
+            res = self.pay()
+        self.assertEqual(res.status_code, 201)
+        self.assertFalse(res.json()["emailed"])
+        self.assertEqual(PaymentRequest.objects.count(), 1)
+
+    def test_pro_shop_cannot_pay_again(self):
+        Shop.objects.filter(pk=self.shop.pk).update(plan="pro")
+        self.assertEqual(self.pay().json()["code"], "already_pro")
+
+    def test_signed_out_cannot_submit(self):
+        self.assertEqual(APIClient().post("/api/auth/payments/", {}).status_code, 401)
+
+    def test_screenshots_are_private(self):
+        self.pay()
+        p = PaymentRequest.objects.get()
+        url = f"/api/auth/payments/{p.pk}/proof/0/"
+        self.assertEqual(self.c.get(url).status_code, 200)  # the owner
+        self.assertEqual(self.c.get(url).headers["Content-Type"], "image/png")
+        self.assertEqual(APIClient().get(url).status_code, 401)
+        other = User.objects.create_user("o@example.com", "o@example.com", PW)
+        shop2 = Shop.objects.create(owner=other)
+        c2 = APIClient(); c2.force_authenticate(other)
+        self.assertEqual(c2.get(url).status_code, 404)  # another customer
+        staff = User.objects.create_user("s@example.com", "s@example.com", PW, is_staff=True)  # no shop at all
+        c3 = APIClient(); c3.force_authenticate(staff)
+        self.assertEqual(c3.get(url).status_code, 200)
+        self.assertEqual(c3.get(f"/api/auth/payments/{p.pk}/proof/5/").status_code, 404)
+        del shop2
+
+
+class ReviewTests(AuthBase):
+    def setUp(self):
+        super().setUp()
+        self.sign_up_and_verify()
+        self.shop = Shop.objects.get(owner__username="a@example.com")
+        self.user = self.shop.owner
+        from .models import PaymentMethod
+        self.p = PaymentRequest.objects.create(shop=self.shop, user=self.user, method=PaymentMethod.objects.get(key="jazzcash"), transaction_id="T1")
+        mail.outbox.clear()
+
+    def test_approve_turns_on_pro_and_emails_the_signin_address(self):
+        from . import payments
+        payments.review(self.p, True)
+        self.shop.refresh_from_db()
+        self.assertEqual(self.shop.plan, "pro")
+        self.assertEqual(mail.outbox[-1].to, ["a@example.com"])
+        self.assertIn("Pro plan is active", mail.outbox[-1].subject)
+        self.assertIn("now active", mail.outbox[-1].body)
+        self.assertIsNone(self.shop.bill_limit)
+
+    @override_settings(ADMIN_WHATSAPP_NUMBER="923001234567")
+    def test_reject_keeps_free_and_sends_whatsapp_link(self):
+        from . import payments
+        payments.review(self.p, False, note="Amount did not match")
+        self.shop.refresh_from_db()
+        self.assertEqual(self.shop.plan, "free")
+        m = mail.outbox[-1]
+        self.assertIn("https://wa.me/923001234567?text=", m.body)
+        self.assertIn("Amount did not match", m.body)
+        self.assertIn("T1", m.body)
+
+    def test_a_decision_cannot_be_made_twice(self):
+        from . import payments
+        payments.review(self.p, False)
+        with self.assertRaises(payments.ReviewError):
+            payments.review(self.p, True)
+        self.shop.refresh_from_db()
+        self.assertEqual(self.shop.plan, "free")
+
+    def test_admin_status_change_does_the_whole_approval(self):
+        admin = User.objects.create_superuser("root@example.com", "root@example.com", PW)
+        c = APIClient(); c.force_login(admin)
+        page = c.get(f"/admin/accounts/paymentrequest/{self.p.pk}/change/")
+        self.assertEqual(page.status_code, 200)
+        res = c.post(f"/admin/accounts/paymentrequest/{self.p.pk}/change/", {"status": "approved", "admin_note": "", "proofs-TOTAL_FORMS": 0, "proofs-INITIAL_FORMS": 0, "proofs-MIN_NUM_FORMS": 0, "proofs-MAX_NUM_FORMS": 1000})
+        self.assertEqual(res.status_code, 302, res.content[:300])
+        self.shop.refresh_from_db()
+        self.assertEqual(self.shop.plan, "pro")
+        self.p.refresh_from_db()
+        self.assertEqual(self.p.reviewed_by, admin)
+        self.assertEqual(mail.outbox[-1].to, ["a@example.com"])
+
+    def test_admin_bulk_reject_action(self):
+        admin = User.objects.create_superuser("root@example.com", "root@example.com", PW)
+        c = APIClient(); c.force_login(admin)
+        res = c.post("/admin/accounts/paymentrequest/", {"action": "reject_selected", "_selected_action": [self.p.pk]})
+        self.assertEqual(res.status_code, 302)
+        self.p.refresh_from_db()
+        self.assertEqual(self.p.status, "rejected")
 
 
 class BrevoBackendTests(TestCase):
@@ -287,6 +444,21 @@ class BrevoBackendTests(TestCase):
         self.assertEqual(kw["headers"]["api-key"], "k-123")
         self.assertEqual(kw["json"]["sender"], {"email": "me@example.com", "name": "VoiceBill"})
         self.assertEqual(kw["json"]["to"], [{"email": "to@example.com"}])
+
+    def test_html_and_attachments_are_passed_on(self):
+        from unittest.mock import MagicMock
+        from django.core.mail import EmailMultiAlternatives
+        ok = MagicMock(status_code=201)
+        with self.settings(EMAIL_BACKEND="accounts.brevo.BrevoEmailBackend", BREVO_API_KEY="k", DEFAULT_FROM_EMAIL="me@example.com"), \
+                patch("accounts.brevo.requests.post", return_value=ok) as post:
+            m = EmailMultiAlternatives("S", "plain", None, ["to@example.com"], reply_to=["r@example.com"])
+            m.attach_alternative("<b>hi</b>", "text/html")
+            m.attach("shot.png", b"abc", "image/png")
+            m.send()
+        j = post.call_args.kwargs["json"]
+        self.assertEqual(j["htmlContent"], "<b>hi</b>")
+        self.assertEqual(j["attachment"], [{"name": "shot.png", "content": "YWJj"}])
+        self.assertEqual(j["replyTo"], {"email": "r@example.com"})
 
     def test_refusal_is_an_error(self):
         from unittest.mock import MagicMock

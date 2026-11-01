@@ -37,8 +37,10 @@ Run the tests (no OpenAI needed): `python manage.py test`
   another shop's rows. Anonymous requests get **401** (only `/api/health/` and the sign-in endpoints are open).
 - Sessions use an HttpOnly cookie + CSRF token. Sign-in endpoints are rate-limited per address and per email.
 - **Free plan: 10 bills** (`FREE_BILL_LIMIT`). The 11th bill answers **402** `{"code":"plan_limit"}`. Deleting or
-  cancelling a bill never gives a free bill back. Pro is unlimited. Payment is not connected yet: change a plan with
-  `python manage.py set_plan name@example.com pro` (or in `/admin/`).
+  cancelling a bill never gives a free bill back. Pro is unlimited. Pro is paid by hand: the customer picks a method (JazzCash, EasyPaisa, banks, PayPal...), sends the money and
+  uploads screenshots; you get an email with a link to `/admin/accounts/paymentrequest/`, check that the money arrived and
+  approve or reject (the customer is emailed). Edit your account details in `/admin/` > Payment methods.
+  `python manage.py set_plan name@example.com pro` still works for manual changes.
 - Data that existed before accounts were added goes to the first account that signs up (Pro, grandfathered).
 - Local testing without a mail server: the code is printed in the terminal running `runserver`.
 - Google: create a Web OAuth client in Google Cloud Console, add your site address under "Authorised JavaScript

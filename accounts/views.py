@@ -10,13 +10,15 @@ from django.db import transaction
 from django.middleware.csrf import get_token
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.decorators import api_view, authentication_classes, permission_classes
+from django.http import FileResponse
+from rest_framework.decorators import api_view, authentication_classes, parser_classes, permission_classes
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from . import ratelimit, services
+from . import payments, ratelimit, services
 from .authentication import CsrfAlways, SessionAuth
-from .models import EmailCode, TrustedDevice
+from .models import EmailCode, PaymentMethod, PaymentProof, PaymentRequest, TrustedDevice
 
 log = logging.getLogger(__name__)
 User = get_user_model()
@@ -406,14 +408,27 @@ def _resolve(value):
     return value() if callable(value) else value
 
 
+def payment_state(user):
+    """The customer's latest payment request, so the app can show "under review" / "rejected"."""
+    last = user.payment_requests.select_related("method").first()
+    if last is None:
+        return None
+    return {
+        "id": last.id,
+        "status": last.status,
+        "method": last.method.name,
+        "created_at": last.created_at.isoformat(),
+        "note": last.admin_note if last.status == PaymentRequest.Status.REJECTED else "",
+    }
+
+
 @api_view(["GET"])
 def subscription(request):
     shop = request.user.shop
     return Response(
         {
             **shop_json(shop),
-            "payments_ready": False,
-            "demo_upgrade": settings.DEMO_UPGRADE,
+            "payment": payment_state(request.user),
             "plans": [
                 {
                     "id": p["id"],
@@ -428,18 +443,84 @@ def subscription(request):
     )
 
 
+# ------------------------------------------------------------------ paying for Pro by hand
+
+@api_view(["GET"])
+def payment_methods(request):
+    """What the Upgrade window lists: where to send the money, grouped Pakistan / International."""
+    rows = PaymentMethod.objects.filter(is_active=True)
+
+    def one(m):
+        return {
+            "key": m.key,
+            "name": m.name,
+            "group": m.group,
+            "account_title": m.account_title,
+            "number_label": m.number_label,
+            "account_number": m.account_number,
+            "note": m.note,
+            "payer_field": m.payer_field,
+        }
+
+    return Response({"amount": settings.PRO_PRICE_LABEL, "methods": [one(m) for m in rows]})
+
+
 @api_view(["POST"])
-def upgrade(request):
-    """Placeholder until a payment provider is connected. Real upgrades are done with `manage.py set_plan` / the admin."""
-    shop = request.user.shop
+@parser_classes([MultiPartParser, FormParser])
+def submit_payment(request):
+    """"I have paid": screenshots (at least one, several allowed) + optional account and transaction id."""
+    user, shop = request.user, request.user.shop
     if shop.plan == shop.Plan.PRO:
-        return Response(shop_json(shop))
-    if not settings.DEMO_UPGRADE:
-        return err(
-            "Online payment is not connected yet. We will switch your plan to Pro as soon as it is.",
-            "payment_not_connected",
-            501,
+        return err("Your shop is already on the Pro plan.", "already_pro")
+    if not ratelimit.hit(f"payment:{user.pk}", 5, 3600):
+        return too_many(60)
+    if user.payment_requests.filter(status=PaymentRequest.Status.PENDING).exists():
+        return err("Your last payment is still being checked. Please wait for our email.", "payment_pending", 409)
+    method = PaymentMethod.objects.filter(key=str(request.data.get("method") or ""), is_active=True).first()
+    if method is None:
+        return err("Please choose a payment method.")
+    payer = str(request.data.get("payer_account") or "").strip()[:100]
+    if payer and method.payer_field == PaymentMethod.PayerField.EMAIL and not clean_email(payer):
+        return err("That email address does not look right.")
+    if payer and method.payer_field == PaymentMethod.PayerField.MOBILE and not (
+        payer.replace(" ", "").replace("-", "").replace("+", "").isdigit() and 10 <= len(payer.replace(" ", "").replace("-", "").replace("+", "")) <= 15
+    ):
+        return err("That mobile number does not look right.")
+    txn = str(request.data.get("transaction_id") or "").strip()[:64]
+    if txn and not all(ch.isalnum() or ch in "-_/. " for ch in txn):
+        return err("The transaction ID can only have letters, numbers and - _ / .")
+    try:
+        files = payments.clean_files(request.FILES.getlist("screenshots"))
+    except payments.ProofError as exc:
+        return err(str(exc), "bad_proof")
+
+    with transaction.atomic():
+        payment = PaymentRequest.objects.create(
+            shop=shop, user=user, method=method, amount_label=settings.PRO_PRICE_LABEL,
+            payer_account=payer, transaction_id=txn,
         )
-    shop.plan = shop.Plan.PRO
-    shop.save(update_fields=["plan"])
-    return Response(shop_json(shop))
+        for f, mime in files:
+            PaymentProof.objects.create(request=payment, file=f, content_type=mime, size=f.size)
+    emailed = True
+    try:
+        payments.notify_admin(payment)
+    except Exception:  # noqa: BLE001 - the request is saved; the admin still sees it in /admin/
+        log.exception("Could not email the admin about payment #%s", payment.pk)
+        emailed = False
+    return Response({"id": payment.id, "status": payment.status, "emailed": emailed}, status=201)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])  # staff (admin accounts) have no shop, so no HasShop here
+def payment_proof(request, payment_id, index):
+    """A screenshot, shown only to the person who uploaded it and to staff (never a public link)."""
+    payment = PaymentRequest.objects.filter(pk=payment_id).first()
+    if payment is None or not (request.user.is_staff or payment.user_id == request.user.pk):
+        return err("Not found.", http=404)
+    proofs = list(payment.proofs.all())
+    if not (0 <= index < len(proofs)):
+        return err("Not found.", http=404)
+    proof = proofs[index]
+    response = FileResponse(proof.file.open("rb"), content_type=proof.content_type)
+    response["Cache-Control"] = "private, no-store"
+    return response

@@ -2,8 +2,10 @@
 
 Turn on with:  EMAIL_BACKEND=accounts.brevo.BrevoEmailBackend  and  BREVO_API_KEY=...
 The sender address (DEFAULT_FROM_EMAIL) must be a verified sender in your Brevo account.
+Supports an HTML version (EmailMultiAlternatives) and attachments.
 """
 
+import base64
 import logging
 from email.utils import parseaddr
 
@@ -30,9 +32,23 @@ class BrevoEmailBackend(BaseEmailBackend):
                 "subject": msg.subject,
                 "textContent": msg.body,
             }
+            html = next((content for content, mime in getattr(msg, "alternatives", []) if mime == "text/html"), None)
+            if html:
+                payload["htmlContent"] = html
+            if msg.reply_to:
+                payload["replyTo"] = {"email": parseaddr(msg.reply_to[0])[1]}
+            attachments = []
+            for att in msg.attachments:
+                if isinstance(att, tuple) and len(att) == 3:
+                    filename, content, _mime = att
+                    if isinstance(content, str):
+                        content = content.encode()
+                    attachments.append({"name": filename, "content": base64.b64encode(content).decode()})
+            if attachments:
+                payload["attachment"] = attachments
             try:
                 res = requests.post(
-                    URL, json=payload, timeout=15,
+                    URL, json=payload, timeout=20,
                     headers={"api-key": settings.BREVO_API_KEY, "accept": "application/json"},
                 )
                 if res.status_code >= 300:
