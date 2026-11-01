@@ -8,4 +8,10 @@ class HasShop(BasePermission):
 
     def has_permission(self, request, view):
         user = request.user
-        return bool(user and user.is_authenticated and getattr(user, "shop", None) is not None)
+        shop = getattr(user, "shop", None) if user and user.is_authenticated else None
+        if shop is None:
+            return False
+        from . import plans
+
+        plans.downgrade_if_due(shop)  # a Pro that has run out is switched back to Free on the very next request
+        return True

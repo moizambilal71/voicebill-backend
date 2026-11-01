@@ -215,6 +215,8 @@ LEGACY_SHOP_OWNER_EMAIL = os.getenv("LEGACY_SHOP_OWNER_EMAIL", "").strip().lower
 # Pro is paid by hand: the customer sends money, uploads screenshots, and an admin approves it in /admin/.
 # CHANGE THIS to your real price (shown in the Upgrade window and in emails).
 PRO_PRICE_LABEL = os.getenv("PRO_PRICE_LABEL", "Rs 1,999 / month")
+# How long Pro lasts after each approved payment. Then the shop goes back to Free until it pays again.
+PRO_DAYS = int(os.getenv("PRO_DAYS", "30"))
 
 # The website address email buttons open. While testing this is your local site; when deployed, set your domain
 # (e.g. https://app.example.com). If the visitor used a trusted address, that one is used automatically instead.

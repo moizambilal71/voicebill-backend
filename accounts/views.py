@@ -76,6 +76,8 @@ def shop_json(shop):
         "bills_used": shop.bills_generated,
         "bills_left": shop.bills_left,
         "at_limit": shop.at_limit,
+        "pro_until": shop.pro_until.isoformat() if shop.pro_until else None,
+        "days_left": shop.days_left,
     }
 
 
@@ -413,7 +415,7 @@ PLANS = [
         "name": "Pro",
         "price": lambda: settings.PRO_PRICE_LABEL,
         "bills": lambda: None,
-        "features": lambda: ["Unlimited bills", "Everything in Free", "Priority support"],
+        "features": lambda: [f"Unlimited bills for {settings.PRO_DAYS} days", "Everything in Free", "Renew any time", "Priority support"],
     },
 ]
 
@@ -484,8 +486,8 @@ def payment_methods(request):
 def submit_payment(request):
     """"I have paid": screenshots (at least one, several allowed) + optional account and transaction id."""
     user, shop = request.user, request.user.shop
-    if shop.plan == shop.Plan.PRO:
-        return err("Your shop is already on the Pro plan.", "already_pro")
+    if shop.plan == shop.Plan.PRO and shop.pro_until is None:
+        return err("Your shop is on the Pro plan with no end date.", "already_pro")  # paying again to extend is fine
     if not ratelimit.hit(f"payment:{user.pk}", 5, 3600):
         return too_many(60)
     if user.payment_requests.filter(status=PaymentRequest.Status.PENDING).exists():

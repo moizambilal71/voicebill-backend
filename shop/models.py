@@ -30,12 +30,24 @@ class Shop(models.Model):
     )
     name = models.CharField(max_length=200, blank=True)
     plan = models.CharField(max_length=10, choices=Plan.choices, default=Plan.FREE)
+    # When Pro ends (30 days after each approved payment). Empty = Pro never ends (set by hand / grandfathered).
+    pro_until = models.DateTimeField(null=True, blank=True)
     # Bills ever confirmed. Never goes down (deleting or re-opening a bill does not give the free bill back).
     bills_generated = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return self.name or f"Shop {self.pk}"
+
+    @property
+    def days_left(self):
+        """Whole days of Pro left (None when Pro has no end date or the shop is on Free)."""
+        if self.plan != self.Plan.PRO or self.pro_until is None:
+            return None
+        from django.utils import timezone
+
+        seconds = (self.pro_until - timezone.now()).total_seconds()
+        return max(int(-(-seconds // 86400)), 0)
 
     @property
     def bill_limit(self):
@@ -331,6 +343,8 @@ class Notification(models.Model):
     class Kind(models.TextChoices):
         OUT_OF_STOCK = "out_of_stock", "Out of stock"
         REMINDER = "reminder", "Stock reminder"
+        PLAN_ACTIVE = "plan_active", "Plan activated"
+        PLAN_EXPIRED = "plan_expired", "Plan ended"
 
     shop = models.ForeignKey(Shop, related_name="notifications", on_delete=models.CASCADE)
     kind = models.CharField(max_length=20, choices=Kind.choices)

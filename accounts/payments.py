@@ -10,7 +10,9 @@ from django.core.mail import EmailMultiAlternatives
 from django.db import transaction
 from django.utils import timezone
 
-from . import emailing
+from shop.models import Notification
+
+from . import emailing, plans
 from .models import PaymentMethod, PaymentProof, PaymentRequest
 
 log = logging.getLogger(__name__)
@@ -126,7 +128,7 @@ def notify_customer(payment):
             "Your Pro plan is active!",
             f"Hi {html.escape(name)},<br>Thank you! We received your payment and your VoiceBill <b>Pro</b> plan is now active. "
             "You can make <b>unlimited bills</b> from today.",
-            emailing.details_table([("Plan", "Pro"), ("Paid with", payment.method.name), ("Bills", "Unlimited")]),
+            emailing.details_table([("Plan", "Pro"), ("Paid with", payment.method.name), ("Bills", "Unlimited"), ("Active until", f"{payment.shop.pro_until:%d %b %Y}" if payment.shop.pro_until else "No end date")]),
             emailing.button(f"{site}/", "Open Dashboard") + emailing.button(f"{site}/?new=1", "Create Your First Bill", outline=True),
             "Need help? Just reply to this email.",
             preheader="Payment received. Unlimited bills are ready.",
@@ -176,9 +178,11 @@ def review(payment, approve, admin_user=None, note=""):
         payment.admin_note = note[:300]
     payment.save()
     if approve:
-        shop = payment.shop
-        shop.plan = shop.Plan.PRO
-        shop.save(update_fields=["plan"])
+        plans.grant_pro(payment.shop)
+        Notification.objects.create(
+            shop=payment.shop, kind=Notification.Kind.PLAN_ACTIVE, title="Your Pro plan is active",
+            message=f"Unlimited bills until {payment.shop.pro_until:%d %b %Y}. Thank you!",
+        )
     try:
         notify_customer(payment)
     except Exception:  # noqa: BLE001 - the decision stands even if the email fails; the admin is told

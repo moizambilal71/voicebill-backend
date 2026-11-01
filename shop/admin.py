@@ -46,6 +46,6 @@ admin.site.register(BillTemplate)
 
 @admin.register(Shop)
 class ShopAdmin(admin.ModelAdmin):
-    list_display = ["__str__", "owner", "plan", "bills_generated", "created_at"]
+    list_display = ["__str__", "owner", "plan", "pro_until", "bills_generated", "created_at"]
     list_filter = ["plan"]
     search_fields = ["name", "owner__email"]

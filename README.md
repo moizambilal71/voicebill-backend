@@ -40,7 +40,10 @@ Run the tests (no OpenAI needed): `python manage.py test`
   cancelling a bill never gives a free bill back. Pro is unlimited. Pro is paid by hand: the customer picks a method (JazzCash, EasyPaisa, banks, PayPal...), sends the money and
   uploads screenshots; you get an email with a link to `/admin/accounts/paymentrequest/`, check that the money arrived and
   approve or reject (the customer is emailed). Edit your account details in `/admin/` > Payment methods.
-  `python manage.py set_plan name@example.com pro` still works for manual changes.
+  **Pro lasts 30 days** (`PRO_DAYS`) from each approved payment; paying again before it ends adds 30 more days. When it runs
+  out the shop goes back to Free automatically (on the next request, or within 5 minutes by the background check), the owner
+  gets an in-app notification and an email telling them to pay again. Pro with no end date (old / hand-set shops) never expires.
+  `python manage.py set_plan name@example.com pro [--days 60 | --forever]` still works for manual changes.
 - Data that existed before accounts were added goes to the first account that signs up (Pro, grandfathered).
 - Local testing without a mail server: the code is printed in the terminal running `runserver`.
 - Google: create a Web OAuth client in Google Cloud Console, add your site address under "Authorised JavaScript

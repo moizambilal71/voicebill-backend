@@ -82,7 +82,7 @@ def send_reminder_if_due(shop, now=None):
     if not names:
         return False
     days = ShopSettings.for_shop(shop).reminder_days
-    latest = Notification.objects.filter(shop=shop).first()  # newest of any kind
+    latest = Notification.objects.filter(shop=shop, kind__in=[Notification.Kind.OUT_OF_STOCK, Notification.Kind.REMINDER]).first()  # newest stock message
     if latest is not None and now - latest.created_at < timedelta(days=days):
         return False
     shown = ", ".join(names[:5]) + (f" and {len(names) - 5} more" if len(names) > 5 else "")
@@ -97,6 +97,9 @@ def send_reminder_if_due(shop, now=None):
 
 
 def run_checks(now=None):
+    from accounts import plans  # imported here: accounts depends on shop
+
+    plans.downgrade_expired()
     created = sync_all()
     reminded = sum(send_reminder_if_due(shop, now) for shop in Shop.objects.all())
     return {"out_of_stock": created, "reminder": bool(reminded)}
