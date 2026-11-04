@@ -145,7 +145,13 @@ def csrf(request):
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def me(request):
-    return Response(user_json(request.user))
+    user = request.user
+    if getattr(user, "shop", None) is None:
+        # Signed in without going through sign-up (e.g. a superuser session from /admin/): give it a shop.
+        with transaction.atomic():
+            services.claim_or_create_shop(user)
+        user = get_user_model().objects.get(pk=user.pk)
+    return Response(user_json(user))
 
 
 @api_view(["POST"])

@@ -524,3 +524,15 @@ class EmailLinkTests(AuthBase):
         html = mail.outbox[-1].alternatives[0][0]
         self.assertIn("Your verification code", html)
         self.assertIn(last_code(), html)
+
+
+class ShoplessSessionTests(TestCase):
+    def test_me_gives_a_shop_to_an_account_that_has_none(self):
+        from django.contrib.auth import get_user_model
+
+        user = get_user_model().objects.create_superuser("root", "root@example.com", "pw-12345-xyz")
+        client = APIClient()
+        client.force_login(user)
+        data = client.get("/api/auth/me/").json()
+        self.assertIsNotNone(data["shop"])
+        self.assertEqual(client.get("/api/summary/").status_code, 200)
