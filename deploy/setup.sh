@@ -118,6 +118,16 @@ systemctl enable voicebill-api voicebill-web voicebill-monitor >/dev/null
 systemctl restart voicebill-api voicebill-web voicebill-monitor
 
 echo "==> 7/8 Web server (nginx)"
+mkdir -p /opt/voicebill/downloads /etc/nginx/snippets
+chmod 755 /opt/voicebill /opt/voicebill/downloads
+cat > /etc/nginx/snippets/voicebill-downloads.conf <<'SNIP'
+location ^~ /downloads/ {
+    alias /opt/voicebill/downloads/;
+    default_type application/vnd.android.package-archive;
+    add_header Content-Disposition "attachment";
+    add_header Cache-Control "no-cache";
+}
+SNIP
 cat > /etc/nginx/sites-available/voicebill <<NGINX
 server {
     listen 80;
@@ -131,6 +141,7 @@ server {
 
     location ^~ /admin/  { proxy_pass http://127.0.0.1:8000; }
     location ^~ /static/ { proxy_pass http://127.0.0.1:8000; }
+    include /etc/nginx/snippets/voicebill-downloads.conf;
     location /           { proxy_pass http://127.0.0.1:3000; }
 }
 NGINX
