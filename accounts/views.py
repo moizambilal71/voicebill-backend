@@ -351,6 +351,28 @@ def logout_view(request):
 
 
 @api_view(["POST"])
+@permission_classes([IsAuthenticated])  # staff accounts have no shop, so no HasShop here
+def delete_account(request):
+    """Permanently delete the signed-in person's account, shop and everything in it (required by app stores)."""
+    user = request.user
+    if user.is_staff or user.is_superuser:
+        return err("Admin accounts cannot be deleted here.", http=403)
+    if not ratelimit.hit(f"delete:{user.pk}", 5, 3600):
+        return too_many(60)
+    if user.has_usable_password():
+        if not user.check_password(str(request.data.get("password") or "")):
+            return err("That password is not right.", "wrong_password")
+    elif str(request.data.get("confirm") or "").strip().lower() != (user.email or "").lower():
+        return err("Type your email address to confirm.", "confirm_mismatch")
+    with transaction.atomic():
+        for proof in PaymentProof.objects.filter(request__user=user):
+            proof.file.delete(save=False)  # the uploaded payment screenshots
+        user.delete()  # removes the shop, products, bills, customers, payments and sign-in records with it
+    logout(request)
+    return Response({"ok": True})
+
+
+@api_view(["POST"])
 @public
 def password_forgot(request):
     if not ip_ok(request, "forgot", 30):

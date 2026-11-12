@@ -536,3 +536,26 @@ class ShoplessSessionTests(TestCase):
         data = client.get("/api/auth/me/").json()
         self.assertIsNotNone(data["shop"])
         self.assertEqual(client.get("/api/summary/").status_code, 200)
+
+
+class DeleteAccountTests(AuthBase):
+    def setUp(self):
+        super().setUp()
+        self.sign_up_and_verify()
+
+    def test_wrong_password_deletes_nothing(self):
+        res = self.post("/api/auth/delete/", {"password": "nope-nope-nope"})
+        self.assertEqual(res.status_code, 400)
+        self.assertTrue(User.objects.filter(email="a@example.com").exists())
+
+    def test_right_password_deletes_the_account_and_its_shop(self):
+        self.assertEqual(Shop.objects.count(), 1)
+        res = self.post("/api/auth/delete/", {"password": PW})
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(User.objects.filter(email="a@example.com").exists())
+        self.assertEqual(Shop.objects.count(), 0)
+        self.assertEqual(self.c.get("/api/auth/me/").status_code, 401)  # signed out
+
+    def test_must_be_signed_in(self):
+        self.post("/api/auth/logout/")
+        self.assertIn(self.post("/api/auth/delete/", {"password": PW}).status_code, (401, 403))

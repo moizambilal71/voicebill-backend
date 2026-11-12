@@ -11,6 +11,7 @@ urlpatterns = [
     path("resend/", views.resend),
     path("google/", views.google),
     path("logout/", views.logout_view),
+    path("delete/", views.delete_account),
     path("password/forgot/", views.password_forgot),
     path("password/reset/", views.password_reset),
     path("subscription/", views.subscription),
