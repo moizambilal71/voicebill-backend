@@ -209,6 +209,8 @@ TRUSTED_DEVICE_DAYS = 30
 
 # "Continue with Google": the OAuth client id from Google Cloud Console (the same value the frontend uses).
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+# Demo account for app-store reviewers: signs in with its password only, no emailed code. Leave empty to turn off.
+REVIEW_ACCOUNT_EMAIL = os.getenv("REVIEW_ACCOUNT_EMAIL", "").strip().lower()
 
 # Who may take over the shop data that existed before accounts were added: only this email, or the first person to
 # sign up when this is empty. (A fresh database has no such data, so this only matters for an upgraded install.)

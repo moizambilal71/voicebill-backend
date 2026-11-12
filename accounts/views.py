@@ -243,7 +243,9 @@ def login_view(request):
             if user.last_login is not None:
                 return err("This account has been switched off. Please contact support.", "disabled", 403)
             return need_code(email, EmailCode.Purpose.SIGNUP, user)  # never finished verifying the email
-        if services.is_trusted_device(user, request.COOKIES.get(services.DEVICE_COOKIE)):
+        review = settings.REVIEW_ACCOUNT_EMAIL
+        if services.is_trusted_device(user, request.COOKIES.get(services.DEVICE_COOKIE)) or (review and email == review):
+            # (The app-store review account skips the emailed code so reviewers can sign in; it holds only demo data.)
             response = Response({"user": None})
             start_session(request, user, response)
             response.data = {"user": user_json(user)}

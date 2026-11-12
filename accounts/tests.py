@@ -559,3 +559,25 @@ class DeleteAccountTests(AuthBase):
     def test_must_be_signed_in(self):
         self.post("/api/auth/logout/")
         self.assertIn(self.post("/api/auth/delete/", {"password": PW}).status_code, (401, 403))
+
+
+class ReviewAccountTests(AuthBase):
+    def setUp(self):
+        super().setUp()
+        self.sign_up_and_verify()
+        self.post("/api/auth/logout/")
+        other = APIClient(enforce_csrf_checks=True)
+        other.get("/api/auth/csrf/")
+        self.other = other  # a new device: nothing remembered
+
+    def test_new_device_needs_a_code_normally(self):
+        res = self.post("/api/auth/login/", {"email": "a@example.com", "password": PW}, client=self.other)
+        self.assertTrue(res.json().get("verification_required"))
+
+    @override_settings(REVIEW_ACCOUNT_EMAIL="a@example.com")
+    def test_review_account_signs_in_without_a_code_but_needs_the_password(self):
+        bad = self.post("/api/auth/login/", {"email": "a@example.com", "password": "wrong-password-1"}, client=self.other)
+        self.assertEqual(bad.status_code, 400)
+        res = self.post("/api/auth/login/", {"email": "a@example.com", "password": PW}, client=self.other)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["user"]["email"], "a@example.com")
