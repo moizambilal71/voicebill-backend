@@ -12,6 +12,7 @@ urlpatterns = [
     path("google/", views.google),
     path("logout/", views.logout_view),
     path("delete/", views.delete_account),
+    path("feedback/", views.send_feedback),
     path("password/forgot/", views.password_forgot),
     path("password/reset/", views.password_reset),
     path("subscription/", views.subscription),

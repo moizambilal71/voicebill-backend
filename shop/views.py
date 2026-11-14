@@ -15,7 +15,7 @@ from rest_framework.response import Response
 
 from . import voice as voice_service
 
-from . import importer, monitor
+from . import alerts, importer, monitor
 from .models import Alias, Barcode, Bill, BillItem, BillTemplate, Customer, Notification, PriceHistory, Product, Shop, ShopSettings, Variant
 from .serializers import (
     AliasSerializer,
@@ -480,6 +480,7 @@ MAX_AUDIO_BYTES = 10 * 1024 * 1024
 def _voice_error(exc):
     if isinstance(exc, voice_service.VoiceError):
         return Response({"detail": str(exc)}, status=exc.status)
+    alerts.notify_if_needed(exc)  # tells the owner by email when credits run out, the key is wrong, etc.
     return Response(
         {"detail": f"Voice service error: {exc.__class__.__name__}. Check the API key, model names and internet."},
         status=502,

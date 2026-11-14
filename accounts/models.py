@@ -137,3 +137,33 @@ class PaymentProof(models.Model):
 
     class Meta:
         ordering = ["id"]
+
+
+class Feedback(models.Model):
+    """What a shopkeeper told us from the Feedback page. Shown in the admin; also emailed to the owner."""
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name="feedback", on_delete=models.CASCADE)
+    overall = models.PositiveSmallIntegerField(help_text="1-5 stars: how happy with VoiceBill")
+    ease = models.PositiveSmallIntegerField(help_text="1-5: how easy to use")
+    voice = models.PositiveSmallIntegerField(null=True, blank=True, help_text="1-5: how well voice billing understands")
+    recommend = models.CharField(max_length=10, blank=True, help_text="yes / maybe / no")
+    most_used = models.CharField(max_length=200, blank=True)
+    problem = models.CharField(max_length=60, blank=True, help_text="Biggest problem")
+    message = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Feedback #{self.pk} from {self.user} ({self.overall}/5)"
+
+
+class AdminAlert(models.Model):
+    """Remembers when we last emailed the owner about each kind of problem, so one outage sends one email."""
+
+    kind = models.CharField(max_length=40, unique=True)
+    last_sent_at = models.DateTimeField()
+
+    def __str__(self):
+        return f"{self.kind} @ {self.last_sent_at:%Y-%m-%d %H:%M}"

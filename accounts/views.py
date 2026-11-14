@@ -16,7 +16,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
-from . import emailing, payments, ratelimit, services
+from . import emailing, feedback as feedback_service, payments, ratelimit, services
 from .authentication import CsrfAlways, SessionAuth
 from .models import EmailCode, PaymentMethod, PaymentProof, PaymentRequest, TrustedDevice
 
@@ -570,3 +570,16 @@ def payment_proof(request, payment_id, index):
     response = FileResponse(proof.file.open("rb"), content_type=proof.content_type)
     response["Cache-Control"] = "private, no-store"
     return response
+
+
+@api_view(["POST"])
+def send_feedback(request):
+    """A signed-in user sends feedback. It is saved, then emailed to the owner."""
+    if not ratelimit.hit(f"feedback:{request.user.pk}", 5, 3600):
+        return too_many(60)
+    try:
+        fb = feedback_service.create(request.user, request.data)
+    except feedback_service.FeedbackError as exc:
+        return Response({"detail": str(exc)}, status=400)
+    feedback_service.notify_admin(fb)
+    return Response({"ok": True}, status=201)

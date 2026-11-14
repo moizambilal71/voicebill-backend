@@ -2,7 +2,7 @@ from django.contrib import admin, messages
 from django.utils.html import format_html, format_html_join
 
 from . import payments
-from .models import PaymentMethod, PaymentProof, PaymentRequest
+from .models import AdminAlert, Feedback, PaymentMethod, PaymentProof, PaymentRequest
 
 
 @admin.register(PaymentMethod)
@@ -87,3 +87,24 @@ class PaymentRequestAdmin(admin.ModelAdmin):
     def reject_selected(self, request, queryset):
         for obj in queryset:
             self._review(request, obj, False)
+
+
+@admin.register(Feedback)
+class FeedbackAdmin(admin.ModelAdmin):
+    list_display = ["created_at", "user", "overall", "ease", "voice", "recommend", "problem", "short_message"]
+    list_filter = ["overall", "recommend", "problem"]
+    search_fields = ["user__email", "user__first_name", "message"]
+    date_hierarchy = "created_at"
+    readonly_fields = [f.name for f in Feedback._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    @admin.display(description="Message")
+    def short_message(self, obj):
+        return (obj.message[:70] + "…") if len(obj.message) > 70 else obj.message
+
+
+@admin.register(AdminAlert)
+class AdminAlertAdmin(admin.ModelAdmin):
+    list_display = ["kind", "last_sent_at"]
