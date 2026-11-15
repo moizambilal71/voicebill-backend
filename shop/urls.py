@@ -1,7 +1,7 @@
 from django.urls import include, path
 from rest_framework.routers import DefaultRouter
 
-from . import views
+from . import dashboard, views
 
 router = DefaultRouter()
 router.register("products", views.ProductViewSet)
@@ -15,6 +15,7 @@ router.register("notifications", views.NotificationViewSet)
 urlpatterns = [
     path("health/", views.health),
     path("summary/", views.summary),
+    path("dashboard/", dashboard.dashboard),
     path("settings/", views.shop_settings),
     path("voice/transcribe/", views.voice_transcribe),
     path("voice/interpret/", views.voice_interpret),

@@ -874,3 +874,37 @@ class BillPagingTests(ShopTestCase):
         self.assertEqual(client.get("/api/bills/?limit=5&q=c1").json()["count"], 3)  # c1, c10, c11
         self.assertEqual(len(client.get("/api/bills/").json()), 12)  # plain list unchanged
         self.assertEqual(client.get("/api/bills/?limit=x").status_code, 400)
+
+
+class DashboardTests(ShopTestCase):
+    def _sell(self, client, variant, qty, customer=""):
+        bill = Bill.objects.create(shop=self.shop, customer_name=customer)
+        client.post(f"/api/bills/{bill.id}/add_item/", {"variant": variant.id, "quantity": qty}, format="json")
+        client.post(f"/api/bills/{bill.id}/confirm/")
+        return bill
+
+    def test_totals_top_items_and_stock(self):
+        client = self.make_client()
+        p = Product.objects.create(shop=self.shop, name="Pen", unit="piece", track_stock=True)
+        v = Variant.objects.create(product=p, name="Standard", price=20, stock=50)
+        q = Product.objects.create(shop=self.shop, name="Book", unit="piece", track_stock=True)
+        w = Variant.objects.create(product=q, name="Standard", price=100, stock=3)
+        self._sell(client, v, 2, "Ali")
+        self._sell(client, w, 1, "Ali")
+        Bill.objects.create(shop=self.shop)  # a draft must not count
+        res = client.get("/api/dashboard/?days=7").json()
+        self.assertEqual(res["today_sales"], 140.0)
+        self.assertEqual((res["bills"], res["today_bills"], res["average"], res["sales"]), (2, 2, 70.0, 140.0))
+        self.assertEqual(len(res["per_day"]), 7)
+        self.assertEqual(res["per_day"][-1]["total"], 140.0)
+        self.assertEqual([i["name"] for i in res["top_items"]], ["Book (Standard)", "Pen (Standard)"])
+        self.assertEqual(res["top_customers"], [{"name": "Ali", "total": 140.0}])
+        self.assertEqual(len(res["recent"]), 2)
+        self.assertEqual([x["name"] for x in res["low_stock"]], ["Book"])
+
+    def test_30_days_and_other_shops_are_separate(self):
+        client = self.make_client()
+        res = client.get("/api/dashboard/?days=30").json()
+        self.assertEqual(len(res["per_day"]), 30)
+        self.assertEqual(res["bills"], 0)
+        self.assertEqual(res["average"], 0.0)
